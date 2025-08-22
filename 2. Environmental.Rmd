@@ -1,0 +1,446 @@
+---
+title: Habitat Suitability Model - Environmental Data Downloading and Processing
+author: Maddie Thomson
+date: 2025-07-14
+output: html_notebook
+---
+
+**Purpose:** Download, process, and prepare environmental data from Bio-Oracle for Southern Ocean species distribution modeling. This script handles environmental variable acquisition, spatial filtering, temporal averaging, and data integration to prepare environmental layers for habitat suitability modeling. This section is very time consuming and should only be done once.
+
+**Code to run before:** "1. Occurrences.Rmd"\
+**Code to run after:** "3. DataCleaning.Rmd"
+
+## 1. Setup and Directory Definition
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+# Load required libraries
+library(terra); library(sf); library(biooracler); library(ncdf4)           
+
+# Set working directory to the script location
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Define paths for different environmental data types and time periods
+dir2010surf <- file.path(script_dir, "env2010", "surf")
+dir2020surf <- file.path(script_dir, "env2020", "surf")
+dir2010mean <- file.path(script_dir, "env2010", "mean")
+dir2020mean <- file.path(script_dir, "env2020", "mean")
+dir2010B <- file.path(script_dir, "Bath2010")
+dir2020B <- file.path(script_dir, "Bath2020")
+
+# Create directories if they don't exist
+dirs_to_create <- c(dir2010surf, dir2020surf, dir2010mean, dir2020mean, dir2010B, dir2020B)
+for(dir in dirs_to_create) {
+  if(!dir.exists(dir)) {
+    dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+    cat("Created directory:", dir, "\n")
+  }
+}
+```
+
+------------------------------------------------------------------------
+
+## 2. Spatial Boundary Setup
+
+This section uses the Southern Ocean polygon defined in the previous script (if not loaded, it is redefined) to set up spatial constraints for data download.
+
+```{r spatial-setup}
+# Check if SO_polygon exists from previous script
+if(!exists("SO_polygon")) {
+  cat("SO_polygon not found from previous script. Redefining...\n")
+  SO_polygon <- "POLYGON((180 -44.3,173 -44.3,173 -47.5,170 -47.5,157 -47.5,157 -45.9,150 -45.9,150 -47.5,143 -47.5,143 -45.8,140 -45.8,140 -44.5,137 -44.5,137 -43,135 -43,135 -41.7,131 -41.7,131 -40.1,115 -40.1,92 -40.1,92 -41.4,78 -41.4,78 -42.3,69 -42.3,69 -43.3,47 -43.3,47 -41.7,30 -41.7,12 -41.7,12 -40.3,10 -40.3,10 -38.3,-5 -38.3,-5 -38.9,-9 -38.9,-9 -40.2,-13 -40.2,-13 -41.4,-21 -41.4,-21 -42.5,-39 -42.5,-39 -40.7,-49 -40.7,-49 -48.6,-54 -48.6,-54 -55.7,-62.7972582608082 -55.7,-64 -55.7,-64 -57.8,-71 -57.8,-71 -58.9,-80 -58.9,-80 -40,-125 -40,-167 -40,-167 -42.6,-171 -42.6,-171 -44.3,-180 -44.3,-180 -90, 0 -90,180 -90,180 -44.3))"
+}
+
+# Convert polygon to spatial objects for use in data processing
+SO_polygon_geom <- st_as_sfc(SO_polygon, crs = 4326) 
+SO_bbox <- st_bbox(SO_polygon_geom) # Get bounding box for cropping rasters
+
+cat("Southern Ocean polygon loaded successfully\n")
+cat("Bounding box:", paste(round(SO_bbox, 2), collapse = ", "), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 3. Environmental Variable Configuration
+
+This section defines the environmental variables to download from Bio-Oracle for different time periods and depth layers. Additional information on the Bio-ORACLE data is found here: <https://bio-oracle.org/>. Bio-ORACLE includes data from the time period 2000–2020, but in two chunks (2000-2010 and 2010-2020).
+
+```{r variable-config}
+# Function to create bounding box constraints for Bio-Oracle downloads
+bbox_constraints <- function(time, bbox) {
+  list(
+    time = rep(time, 2),  # Start and end times the same
+    longitude = c(max(SO_bbox["xmin"], -179.975), min(SO_bbox["xmax"], 179.975)),
+    latitude = c(max(SO_bbox["ymin"], -89.975), min(SO_bbox["ymax"], 89.975))
+  )}
+
+# Define datasets for 2020 time period (surface and mean depth)
+datasets2020surf <- list(
+  list(
+    dataset_id = "chl_baseline_2000_2018_depthsurf",
+    variables = c("chl_mean", "chl_min", "chl_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "o2_baseline_2000_2018_depthsurf",
+    variables = c("o2_mean", "o2_min", "o2_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "thetao_baseline_2000_2019_depthsurf",
+    variables = c("thetao_mean", "thetao_min", "thetao_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "so_baseline_2000_2019_depthsurf",
+    variables = c("so_mean", "so_min", "so_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sithick_baseline_2000_2020_depthsurf",
+    variables = c("sithick_mean","sithick_min","sithick_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sws_baseline_2000_2019_depthsurf",
+    variables = c("sws_mean","sws_min", "sws_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  )  
+)  
+
+datasets2020mean <- list(
+  list(
+    dataset_id = "o2_baseline_2000_2018_depthmean",
+    variables = c("o2_mean", "o2_min", "o2_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "thetao_baseline_2000_2019_depthmean",
+    variables = c("thetao_mean", "thetao_min", "thetao_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "so_baseline_2000_2019_depthmean",
+    variables = c("so_mean", "so_min", "so_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sws_baseline_2000_2019_depthmean",
+    variables = c("sws_mean","sws_min", "sws_max"),
+    constraints = bbox_constraints("2010-01-01T00:00:00Z", SO_bbox)
+  )
+)
+
+# Define datasets for 2010 time period (surface and mean depth)
+datasets2010surf <- list(
+  list(
+    dataset_id = "chl_baseline_2000_2018_depthsurf",
+    variables = c("chl_mean", "chl_min", "chl_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "o2_baseline_2000_2018_depthsurf",
+    variables = c("o2_mean","o2_min", "o2_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "thetao_baseline_2000_2019_depthsurf",
+    variables = c("thetao_mean", "thetao_min", "thetao_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "so_baseline_2000_2019_depthsurf",
+    variables = c("so_mean", "so_min", "so_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sithick_baseline_2000_2020_depthsurf",
+    variables = c("sithick_mean","sithick_min","sithick_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sws_baseline_2000_2019_depthsurf",
+    variables = c("sws_mean","sws_min", "sws_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  )
+)  
+
+datasets2010mean <- list(
+  list(
+    dataset_id = "o2_baseline_2000_2018_depthmean",
+    variables = c("o2_mean", "o2_min", "o2_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "thetao_baseline_2000_2019_depthmean",
+    variables = c("thetao_mean", "thetao_min", "thetao_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "so_baseline_2000_2019_depthmean",
+    variables = c("so_mean", "so_min", "so_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  ),
+  list(
+    dataset_id = "sws_baseline_2000_2019_depthmean",
+    variables = c("sws_mean","sws_min", "sws_max"),
+    constraints = bbox_constraints("2000-01-01T00:00:00Z", SO_bbox)
+  )
+)
+
+cat("Environmental variable configurations defined for:\n")
+cat("- 2010 surface variables:", length(datasets2010surf), "datasets\n")
+cat("- 2010 mean depth variables:", length(datasets2010mean), "datasets\n")
+cat("- 2020 surface variables:", length(datasets2020surf), "datasets\n")
+cat("- 2020 mean depth variables:", length(datasets2020mean), "datasets\n")
+```
+
+------------------------------------------------------------------------
+
+## 4. Bio-Oracle Data Download
+
+This section downloads environmental data from Bio-ORACLE for all configured datasets. Since the download is time-intensive, it only needs to be run once. Be sure to save the output so the data can be reused without repeating the process. ⚠️ WARNING: This section is very time-consuming and should only be run ONCE! Do not re-run unless you need to re-download all environmental data.
+
+```{r data-download, eval=FALSE}
+cat("Starting Bio-Oracle data download...\n")
+cat("This process may take several hours. Please be patient.\n")
+
+# Download 2010 surface data
+cat("Downloading 2010 surface data...\n")
+for (dataset in datasets2010surf) {
+  dataset_id <- dataset$dataset_id
+  variables <- dataset$variables
+  constraints <- dataset$constraints
+  
+  cat("Downloading:", dataset_id, "\n")
+  download_layers(dataset_id, variables = variables, constraints = constraints, directory = dir2010surf)
+}
+
+# Download 2020 surface data
+cat("Downloading 2020 surface data...\n")
+for (dataset in datasets2020surf) {
+  dataset_id <- dataset$dataset_id
+  variables <- dataset$variables
+  constraints <- dataset$constraints
+  
+  cat("Downloading:", dataset_id, "\n")
+  download_layers(dataset_id, variables = variables, constraints = constraints, directory = dir2020surf)
+}
+
+# Download 2010 mean depth data
+cat("Downloading 2010 mean depth data...\n")
+for (dataset in datasets2010mean) {
+  dataset_id <- dataset$dataset_id
+  variables <- dataset$variables
+  constraints <- dataset$constraints
+  
+  cat("Downloading:", dataset_id, "\n")
+  download_layers(dataset_id, variables = variables, constraints = constraints, directory = dir2010mean)
+}
+
+# Download 2020 mean depth data
+cat("Downloading 2020 mean depth data...\n")
+for (dataset in datasets2020mean) {
+  dataset_id <- dataset$dataset_id
+  variables <- dataset$variables
+  constraints <- dataset$constraints
+  
+  cat("Downloading:", dataset_id, "\n")
+  download_layers(dataset_id, variables = variables, constraints = constraints, directory = dir2020mean)
+}
+
+cat("Bio-Oracle data download completed!\n")
+```
+
+------------------------------------------------------------------------
+
+## 5. NetCDF File Inspection
+
+This section inspects downloaded NetCDF files to identify variables for proper file naming and organization.
+
+```{r file-inspection}
+# This step helps determine how to rename files based on their contents.
+# ⚠️ WARNING: You *must* manually rename the files in your directories to reflect the correct variable names. This step is critical and should only be done ONCE right after downloading.
+
+# Function to inspect NetCDF files in a directory
+inspect_nc_files <- function(dir_path) {
+  files <- list.files(path = dir_path, pattern = "\\.nc$", full.names = TRUE)
+  
+  if(length(files) == 0) {
+    cat("No .nc files found in:", dir_path, "\n")
+    return(NULL)
+  }
+  
+  info <- lapply(files, function(f) {
+    nc <- nc_open(f)
+    vars <- names(nc$var)
+    nc_close(nc)
+    list(filename = basename(f), variables = vars)
+  })
+  
+  cat("Files in", dir_path, ":\n")
+  for (i in seq_along(info)) {
+    cat(i, info[[i]]$filename, "contains:", paste(info[[i]]$variables, collapse = ", "), "\n")
+  }
+  
+  return(info)
+}
+
+# Inspect files in each directory
+cat("=== INSPECTING DOWNLOADED FILES ===\n")
+info2010surf <- inspect_nc_files(dir2010surf)
+info2010mean <- inspect_nc_files(dir2010mean)
+info2020surf <- inspect_nc_files(dir2020surf)
+info2020mean <- inspect_nc_files(dir2020mean)
+```
+
+------------------------------------------------------------------------
+
+## 6. Bathymetric Data Processing
+
+This section loads and processes bathymetric data layers to be integrated with the environmental predictors. Instead of downloading the data directly through R, the layers were obtained from the Bio-ORACLE website. File names were manually edited to match the variable names used in the workflow before importing. Ensure this step is completed before loading the data.
+
+```{r bathymetry-processing}
+cat("Loading bathymetric data...\n")
+
+# Load bathymetric files
+bath_files2010 <- list.files(dir2010B, pattern = "\\.nc$", full.names = TRUE)
+bath_files2020 <- list.files(dir2020B, pattern = "\\.nc$", full.names = TRUE)
+
+if(length(bath_files2010) > 0 && length(bath_files2020) > 0) {
+  bath2010 <- terra::rast(bath_files2010)
+  bath2020 <- terra::rast(bath_files2020)
+  
+  cat("Bathymetric data loaded successfully\n")
+  cat("2010 bathymetry layers:", nlyr(bath2010), "\n")
+  cat("2020 bathymetry layers:", nlyr(bath2020), "\n")
+} else {
+  cat("Warning: Bathymetric files not found. Please ensure files are in the correct directories.\n")
+}
+```
+
+------------------------------------------------------------------------
+
+## 7. Environmental Data Integration and Processing
+
+This section loads the environmental raster files, computes temporal averages for each variable, and combines all layers into a single data set for modelling.
+
+```{r data-integration, warning=FALSE}
+cat("Loading environmental raster files...\n")
+
+# Load environmental raster files by year/type
+env2010mean <- terra::rast(list.files(dir2010mean, pattern = "\\.nc$", full.names = TRUE))
+env2010surf <- terra::rast(list.files(dir2010surf, pattern = "\\.nc$", full.names = TRUE))
+env2020mean <- terra::rast(list.files(dir2020mean, pattern = "\\.nc$", full.names = TRUE))
+env2020surf <- terra::rast(list.files(dir2020surf, pattern = "\\.nc$", full.names = TRUE))
+
+cat("Environmental data loaded:\n")
+cat("2010 mean depth layers:", nlyr(env2010mean), "\n")
+cat("2010 surface layers:", nlyr(env2010surf), "\n")
+cat("2020 mean depth layers:", nlyr(env2020mean), "\n")
+cat("2020 surface layers:", nlyr(env2020surf), "\n")
+
+# Perform temporal averaging (2010 and 2020)
+cat("Performing temporal averaging (2010-2020)...\n")
+env_mean_avg <- (env2010mean + env2020mean) / 2
+env_surf_avg <- (env2010surf + env2020surf) / 2
+
+# Average bathymetry rasters if available
+if(exists("bath2010") && exists("bath2020")) {
+  bath_avg <- (bath2010 + bath2020) / 2
+  cat("Bathymetry averaging completed\n")
+}
+
+# Add suffixes to distinguish layer types
+names(env_mean_avg) <- paste0(names(env_mean_avg), "_benth")
+names(env_surf_avg) <- paste0(names(env_surf_avg), "_surf")
+
+# Set CRS to WGS84 for all layers
+crs(env_mean_avg) <- crs(env_surf_avg) <- "EPSG:4326"
+if(exists("bath_avg")) {
+  crs(bath_avg) <- "EPSG:4326"
+}
+
+cat("Temporal averaging and CRS assignment completed\n")
+```
+
+------------------------------------------------------------------------
+
+## 8. Spatial Cropping and Masking
+
+This section crops and masks all environmental layers to the Southern Ocean study area, which was defined in section 1.
+
+```{r spatial-processing}
+cat("Cropping and masking environmental layers to study area...\n")
+
+# Convert SO polygon to terra vector
+SO_poly <- vect(SO_polygon, crs = "EPSG:4326")
+
+# Crop and mask environmental layers
+env_mean_mask <- mask(crop(env_mean_avg, SO_poly), SO_poly)
+env_surf_mask <- mask(crop(env_surf_avg, SO_poly), SO_poly)
+
+if(exists("bath_avg")) {
+  bath_mask <- mask(crop(bath_avg, SO_poly), SO_poly)
+}
+
+cat("Spatial cropping and masking completed\n")
+
+# Check spatial properties for consistency
+cat("\n=== SPATIAL PROPERTIES CHECK ===\n")
+cat("Surface layers extent:", paste(round(ext(env_surf_mask), 2), collapse = ", "), "\n")
+cat("Mean depth layers extent:", paste(round(ext(env_mean_mask), 2), collapse = ", "), "\n")
+if(exists("bath_mask")) {
+  cat("Bathymetry extent:", paste(round(ext(bath_mask), 2), collapse = ", "), "\n")
+}
+
+cat("Surface layers resolution:", paste(res(env_surf_mask), collapse = " x "), "\n")
+cat("Mean depth layers resolution:", paste(res(env_mean_mask), collapse = " x "), "\n")
+if(exists("bath_mask")) {
+  cat("Bathymetry resolution:", paste(res(bath_mask), collapse = " x "), "\n")
+}
+
+cat("Surface layers CRS:", crs(env_surf_mask), "\n")
+cat("Mean depth layers CRS:", crs(env_mean_mask), "\n")
+if(exists("bath_mask")) {
+  cat("Bathymetry CRS:", crs(bath_mask), "\n")
+}
+```
+
+------------------------------------------------------------------------
+
+## 9. Final Data Integration and Export
+
+This section combines all environmental layers and exports the final data set for use in modeling. This section may be computationally intensive.
+
+```{r final-integration}
+cat("Combining all environmental layers...\n")
+
+# Combine all variable layers
+if(exists("bath_mask")) {
+  vars <- c(env_surf_mask, env_mean_mask, bath_mask)
+  cat("Combined layers: surface + mean depth + bathymetry\n")
+} else {
+  vars <- c(env_surf_mask, env_mean_mask)
+  cat("Combined layers: surface + mean depth (bathymetry not available)\n")
+}
+
+# Export final environmental dataset
+cat("Exporting final environmental dataset...\n")
+writeRaster(vars, "outputs/vars.tif", overwrite = TRUE)
+
+# Create summary of final dataset
+cat("\n=== FINAL ENVIRONMENTAL DATASET SUMMARY ===\n")
+cat("Total layers:", nlyr(vars), "\n")
+cat("Layer names:\n")
+for(i in 1:nlyr(vars)) {
+  cat("  ", i, ":", names(vars)[i], "\n")
+}
+
+cat("Dataset extent:", paste(round(ext(vars), 2), collapse = ", "), "\n")
+cat("Dataset resolution:", paste(res(vars), collapse = " x "), "\n")
+cat("Dataset CRS:", crs(vars), "\n")
+
+cat("\nEnvironmental data processing completed successfully!\n")
+cat("Final dataset saved as: outputs/vars.tif\n")
+```

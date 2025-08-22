@@ -1,0 +1,397 @@
+---
+title: "Habitat Suitability Model - BART Model Development"
+author: "Maddie Thomson"
+date: "2025-07-20"
+output:
+  html_document:
+    df_print: paged
+---
+
+**Purpose:** This notebook documents the full workflow for species distribution modelling (SDM). It includes data preprocessing steps such as bias correction with Kernel Density Estimation (KDE), background data selection using spatial block cross-validation, and other preparatory steps for modelling. The workflow then applies the chosen variable selection method (Spearman or VIF), fits the model, and generates initial predictions. Note that the script is computationally intensive and may require considerable runtime.
+
+**Code to run before:**: "3. DataCleaning.Rmd"
+
+**Code to run after:**: "5. HSMapping.Rmd"
+
+## 1. Setup and Data Loading
+
+Change species and method in "user settings" before running chunk.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load librarie
+library(raster); library(sf); library(MASS); library(terra); library(fuzzySim); library(embarcadero); library(reshape); library(dplyr); library(dbarts); library(SOmap); library(data.table); library(spdep); library(ape); library(pROC); library(SDMPlay); library(ENMeval)
+
+# Set working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# ------------------ USER SETTINGS ------------------
+# Define all species of interest
+myspecies_list <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
+
+# Change species of interest here
+selected_species <- "Dissostichus mawsoni" 
+
+# Select variable selection method: "VIF" or "Spearman"
+method <- "VIF"  
+# ----------------------------------------------------
+
+# Function to clean species names (usually leave unchanged)
+clean_name <- function(x) gsub("[ ()]", "", x)
+
+# Load all species data
+species_data_list <- list()
+for(species in myspecies_list) {
+  species_short <- clean_name(species)
+  suffix <- if(method == "VIF") "varsVIF_2000_vif.csv" else "varscut_2000_spearman.csv"
+  filename <- paste0("outputs/", species_short, suffix)
+  
+  if(file.exists(filename)) {
+    species_data_list[[species_short]] <- fread(filename)
+    cat("Loaded data for", species, "from", filename, "\n")
+  }
+}
+
+# Select species and load data
+selected_species_short <- clean_name(selected_species)
+dat <- species_data_list[[selected_species_short]]
+
+# Load environment variables (both are loaded for compatibility)
+vars_cut <- rast("outputs/vars_cut.tif")
+vars_vif <- rast("outputs/vars_vif.tif")
+
+# Set 'env' based on chosen method (this is what the rest of the code will use)
+env <- if(method == "VIF") vars_vif else vars_cut
+
+# Set up remaining variables
+myspecies <- clean_name(selected_species)
+dir.create(paste0(myspecies, "/"), recursive = TRUE, showWarnings = FALSE)
+setDT(dat)
+dat_sf <- st_as_sf(dat, coords = c("x", "y"), crs = 4326, remove = FALSE)
+dir.create(paste0(myspecies, "/maps"), recursive = TRUE, showWarnings = FALSE)
+
+# Filter for presence records
+presences <- dat[dat$presence == 1, ]
+```
+
+------------------------------------------------------------------------
+
+## 2. Kernel Density Estimation (KDE) for Bias Correction
+
+This section computes a KDE surface to account for spatial aggregation biases in presence-only records. In the Southern Ocean, sampling effort is concentrated in easily accessible regions near research stations, therefore occurrence data tends to be spatially aggregated, leading to biases in models. A KDE approach was determined to be a better option compared to the random background data approach. The KDE is used to create a weighting scheme that estimates the probability of finding presence data for each pixel.
+
+```{r kde-computation, warning=FALSE}
+# Compute KDE for presences using a smaller grid resolution
+KDE_layer <- raster(MASS::kde2d(presences$x, presences$y,
+                 n = c(ncol(env), nrow(env)),
+                 lims = c(ext(env)[1], ext(env)[2], ext(env)[3], ext(env)[4])))
+
+# Convert KDE result to raster
+extent(KDE_layer) <- extent(raster(env))
+KDE_layer <- mask(KDE_layer, subset(raster(env), 1))
+```
+
+------------------------------------------------------------------------
+
+## 3. Project KDE Data to Southern Ocean Map Projection
+
+This section projects both the KDE layer and the presence points to the Southern Ocean map projection (using the SOmap package) for accurate mapping.
+
+```{r project-data, warning=FALSE}
+# Project to SO for presence points
+presences_sp <- SpatialPoints(data.frame(x = presences$x, y = presences$y))
+crs(presences_sp) <- "+proj=longlat +datum=WGS84"
+presences_proj <- SOproj(presences_sp)
+
+# Define Map and KDE_layer projection  
+SObase_map <- SOmap(trim = -40)
+KDE_layer <- SOproj(KDE_layer)
+
+# Plot KDE and presence layer 
+draw_kde_presences <- function() {
+  plot(SObase_map)
+  plot(KDE_layer, col = heat.colors(100), alpha = 0.7, add = TRUE)
+  points(presences_proj, pch = 20, cex = 0.5, col = "blue")
+}
+
+# Save the KDE and presences plot as a PNG
+png(paste0(myspecies, "/maps/KDE_layer_plot", method,".png"), width = 800, height = 600)
+draw_kde_presences()
+dev.off()
+```
+
+------------------------------------------------------------------------
+
+## 4. Select Absences with Bias Weighting
+
+This section selects background (pseudo-absence) data using the KDE raster as a bias surface. The selected absences + presences = 10,000 points.
+
+```{r select-absences, warning=FALSE}
+# Convert KDE raster to terra SpatRaster for fuzzySim. Use the original KDE_layer (not SOmap projected) for bias selection
+bias_raster <- rast(KDE_layer)
+
+# Select absences with spatial/environmental bias weighting. Output includes map (*not a polar projection). Number of selected pseudo absences + presences = 10,000. 
+selected_absences <- selectAbsences(dat, sp.cols = "presence", coord.cols = c("x", "y"), n = 10000 - sum(dat$presence, na.rm = TRUE), bias = bias_raster, seed = 1234)
+
+# Mark selected absences in the main data frame
+dat$selected <- FALSE
+
+# Convert to data.table for fast merging
+setDT(dat)
+setDT(selected_absences)
+
+# Use data.table join to mark selected absences
+dat[selected_absences, selected := TRUE, on = c("x", "y")]
+dat_sf$selected <- dat$selected
+
+```
+
+------------------------------------------------------------------------
+
+## 5. Project Data and Visualize Presences/Pseudo Absences
+
+This section projects all data points and visualizes presences (blue) and selected absences (red). There will be significantly more pseudo absences than presences.
+
+```{r project-and-plot-absences, fig.cap="Presences and absences on SO map"}
+# Update the projected sf object with the new selected column
+dat_sf_proj <- st_transform(dat_sf, crs = so_crs_proj)
+
+# Extract projected coordinates for presences and selected absences
+coords_proj <- st_coordinates(dat_sf_proj[dat_sf_proj$presence == 1, ])
+coords_abs  <- st_coordinates(dat_sf_proj[dat_sf_proj$presence == 0 & dat_sf_proj$selected, ])
+
+# Plot presences and selected absences (i.e, pseudo absences)
+plot_pres_abs <- function() {
+  plot(so_map)
+  points(coords_abs[,1], coords_abs[,2], pch = 20, cex = 0.3, col = "red")
+  points(coords_proj[,1], coords_proj[,2], pch = 20, cex = 0.5, col = "blue")
+  legend("topright", legend = c("Presence", "Selected Absence"),
+         col = c("blue", "red"), pch = 20, pt.cex = c(0.5, 0.3), cex = 0.8)
+}
+
+plot_pres_abs()
+
+# Save SO map with presences and pseudo absences
+png(paste0(myspecies, "/maps/pres_abs_plot", method, ".png"), width = 800, height = 600)
+plot_pres_abs()
+dev.off()
+```
+
+------------------------------------------------------------------------
+
+## 6. Prepare Data for Modelling
+
+This section finalizes the dataset for modelling, incorporating the KDE densities and ensuring column names are refined and accurate.
+
+```{r prep-model-data}
+# Defining modeling columns:
+# The response variable (presence) and the set of predictor variables (var_names) are specified. Ensure the var_names is accurate before modelling. 
+names(dat)
+var_names <- names(env)
+var_names
+
+# Filter for all presences and selected absences (bias-corrected)
+# Recall that dat$selected includes KDE densities and should be incorporated into the model. If this line isn't working, do a rerun it again earlier in the script (line 150).  
+dat_mod <- dat[dat$selected | dat$presence == 1, ]
+
+# Refine predictor list to exclude non-predictor columns
+exclude_cols <- c("presence", "x", "y", "selected", "X_proj", "Y_proj", "cells")
+var_names <- names(dat_mod)[!(names(dat_mod) %in% exclude_cols)]
+
+# Ensure variables exist in both env and data
+common_vars <- intersect(names(env), names(dat_mod))
+var_names <- intersect(var_names, common_vars)
+cat("Final predictor variables:", paste(var_names, collapse = ", "), "\n")
+cat("Number of predictor variables:", length(var_names), "\n")
+```
+
+## 7. Moran's I Test for Spatial Autocorrelation
+
+This section uses Moran’s I to test for spatial autocorrelation in the presence/absence data. The statistic evaluates whether nearby locations are more similar or dissimilar than expected under randomness. Significant positive autocorrelation indicates spatial clustering, which is common in this type of data. In such cases, spatial blocking should be applied (see Section 10). If the test is not significant, random cross-validation may be sufficient, and the BART model can be run with standard random folds.
+
+```{r morans-test}
+# Moran's I test for spatial autocorrelation
+sp_points <- SpatialPointsDataFrame(coords = dat_mod[, c("x", "y")], data = dat_mod, 
+                                   proj4string = CRS("+proj=longlat +datum=WGS84"))
+w <- nb2listw(knn2nb(knearneigh(coordinates(sp_points), k = 5)), style = "W")
+moran_result <- moran.test(dat_mod$presence, w)
+
+# Extract and interpret results
+moran_i <- moran_result$estimate[1]; moran_p <- moran_result$p.value
+cat("Moran's I:", round(moran_i, 4), "P-value:", round(moran_p, 4), "\n")
+cat(ifelse(moran_p < 0.05, "Significant spatial autocorrelation - use block CV", 
+           "No significant autocorrelation - random CV may be appropriate"), "\n")
+
+# Save results 
+write.csv(data.frame(statistic = moran_i, p_value = moran_p, 
+                     interpretation = ifelse(moran_p < 0.05, "Significant", "Not significant"),
+                     direction = ifelse(moran_i > 0, "Positive", "Negative")), 
+          paste0(myspecies, "/morans_i_results", method, ".csv"), row.names = FALSE)
+```
+
+## 8. Spatial Block Cross-Validation (2-fold with Checkerboard)
+
+If the Moran’s I test indicates spatial autocorrelation in the occurrence data, the dataset is partitioned into spatial blocks using a checkerboard pattern. This block cross-validation approach ensures that training (fold 1) and testing (fold 2) data are spatially independent, reducing bias from clustered or patchy latitudinal distributions. The checkerboard method was selected because alternative blocking strategies (e.g., radial “clock” folds) risked producing folds with no presence records given the limited sample size.
+
+```{r block-assessment, warning=FALSE}
+# Use your existing dat_mod data (which has KDE-based background). Create background points from your existing data
+bg_points <- dat_mod[dat_mod$presence == 0, c("x", "y")]
+presence_points <- dat_mod[dat_mod$presence == 1, c("x", "y")]
+
+# Now use the raster version to delineate area into checkerboard 2 fold partitioning.  
+cb1 <- get.checkerboard1(occs = presence_points, envs = env, bg = bg_points, aggregation.factor = 25)
+
+# Add fold information to dat_mod
+dat_mod$fold[dat_mod$presence == 1] <- cb1$occs.grp
+dat_mod$fold[dat_mod$presence == 0] <- cb1$bg.grp
+
+# Map checkerboard both for the presence points and pseudo-absences
+png(paste0(myspecies, "/maps/checkerboard_evaluation_SO", method, ".png"), 
+    width = 1200, height = 600)
+
+par(mfrow = c(1, 2))
+basemap <- SOmap(bathy_legend = TRUE, trim = -38)
+mylegend1 <- SOleg(x = cb1$occs.grp, position = "topright", col = c("red", "blue"), breaks = c(1, 2), trim = -38, label = "Presence Points", rnd = 0, type = "discrete", tlabs = c("fold 1", "fold 2"))
+
+merged1 <- SOmerge(basemap, mylegend1)
+plot(merged1)
+SOplot(presence_points, 
+       col = c("red", "blue")[cb1$occs.grp])
+
+mylegend2 <- SOleg(x = cb1$bg.grp, position = "topright", col = c("red", "blue"), breaks = c(1, 2), trim = -38, label = "Background Points", rnd = 0, type = "discrete", tlabs = c("fold 1", "fold 2"))
+
+merged2 <- SOmerge(basemap, mylegend2)
+plot(merged2)
+SOplot(bg_points, 
+       col = c("red", "blue")[cb1$bg.grp])
+
+# Save plot
+dev.off()
+cat("SOmap checkerboard evaluation plot saved to:", 
+    paste0(myspecies, "/maps/checkerboard_evaluation_SO", method, ".png"), "\n")
+
+# Check fold distribution (presence and pseudo-absences) in training and testing sets 
+cat("Fold distribution:\n")
+print(table(dat_mod$fold, dat_mod$presence, useNA = "ifany"))
+
+#save dat_mod 
+write.csv(as.data.frame(dat_mod), (paste0(myspecies, "/dat_mod", method, ".csv")), row.names = FALSE)
+```
+
+## 9. Final Ensemble Model Processing and Saving
+
+The BART model is fitted using the checkerboard training data, incorporating the KDE bias layer and the full set of predictor variables retained by either the Spearman or VIF selection method. Model parameters can be kept relatively simple to reduce computational demand.
+
+```{r execute-model, message=FALSE, warning=FALSE}
+# Use fold 1 for training
+train_data <- as.data.frame(subset(dat_mod, fold == 1, select = c("presence", var_names)))
+head(train_data)
+nrow(train_data)
+
+# Run BART model with training data
+bart_model <- bart.step(x.data = train_data[, var_names], y.data = train_data[, "presence"], iter.step = 20, tree.step = 5, iter.plot = 20, full = TRUE)
+summary(bart_model)
+```
+
+## 10. Creating Predicitons and Uncertainty Estimates
+
+This step uses the fitted model to generate spatial predictions of habitat suitability (or presence probability) across the entire study region, applying the full environmental raster rather than just the training points. ⚠️ Warning: the raster is very large, so predictions must be processed in chunks. This is necessary because predicting across large rasters all at once can exceed memory limits.This can be time-consuming, typically taking over an hour.
+
+```{r}
+#  The 'embarcadero' package predict function has been edited to work on data frames 
+source("https://raw.githubusercontent.com/AMBarbosa/unpackaged/master/predict_bart_df") 
+
+# Convert environmental raster (env) into a dataframe (env_df) where each row is a pixel.
+env_df <- as.data.frame(env, xy = TRUE)  # Ensure coords are columns `x` and `y`
+
+# Define chunk prediciton function - Each chunk is processed independently. Results are stored in a list.
+predict_bart_simple_df <- function(model, env_df, quantiles = c(0.025, 0.975), chunk_size = 100000) {
+  
+  n_rows <- nrow(env_df)
+  all_results <- list()
+  
+  # Env_df has columns 'x' and 'y' for coordinates and all other columns are predictor variables
+  for(i in seq(1, n_rows, by = chunk_size)) {
+    end_chunk <- min(i + chunk_size - 1, n_rows)
+    chunk_indices <- i:end_chunk
+    
+    cat("Processing rows", i, "to", end_chunk, "of", n_rows, "\n")
+    
+    chunk_env <- env_df[chunk_indices, ]
+    
+    # Remove rows with NA in predictor columns (exclude coords x,y)
+    pred_cols <- setdiff(names(chunk_env), c("x", "y"))
+    valid_rows <- !is.na(rowSums(chunk_env[, pred_cols, drop = FALSE]))
+    
+    if(sum(valid_rows) > 0) {
+      chunk_env_clean <- chunk_env[valid_rows, ]
+      
+      # Predict on predictors only
+      chunk_pred <- predict_bart_df(model, chunk_env_clean[, pred_cols, drop = FALSE], quantiles = quantiles)
+      
+      all_results[[length(all_results) + 1]] <- data.frame(
+        x = chunk_env_clean$x,
+        y = chunk_env_clean$y,
+        mean = chunk_pred[, 1],
+        lower = chunk_pred[, 2],
+        upper = chunk_pred[, 3]
+      )
+    }
+    
+    gc()  # Force garbage collection
+  }
+  
+  # Combine all predictions
+  all_results <- do.call(rbind, all_results)
+  
+  return(all_results)
+}
+
+# Mean posterior prediction, and the lower and upper bounds of the credibility interval specified in 'quantiles' above
+preds <- predict_bart_simple_df(bart_model, env_df, quantiles = c(0.025, 0.975))
+head(preds)  
+
+# Calculate uncertainty interval of the prediction at each site
+preds$uncert <- preds[ , 5] - preds[ , 4]  
+
+# Change to more self-explanatory column names:
+names(preds) <- c("x", "y", "BART_P", "BART_P_lower", "BART_P_upper", "BART_P_uncert")
+
+# Add unique row IDs to both data frames before joining
+dat2 <- dat %>% mutate(row_id = row_number())
+preds2 <- preds %>% mutate(row_id = row_number())
+summary(preds)
+
+# Now find rows in dat2 missing from preds2 by row_id (if any)
+missing_rows <- anti_join(dat2, preds2, by = "row_id")
+
+#put preds2 and dat2 together for a final dataframe 
+dat_clean <- dat2 %>% filter(!row_id %in% missing_rows$row_id)
+dat_clean <- data.frame(dat_clean, preds[,3:6])
+
+# convert to favourability (presence probability minus the effect of modelled prevalence):
+dat_clean$BART_F <- fuzzySim::Fav(pred = dat_clean$BART_P, sample.preval = fuzzySim::prevalence(model = bart_model))
+dat_clean$BART_F_lower <- fuzzySim::Fav(pred = dat_clean$BART_P_lower, sample.preval = fuzzySim::prevalence(model = bart_model))
+dat_clean$BART_F_upper <- fuzzySim::Fav(pred = dat_clean$BART_P_upper, sample.preval = fuzzySim::prevalence(model = bart_model))
+dat_clean$BART_F_uncert <- dat_clean$BART_F_upper - dat_clean$BART_F_lower  
+
+head(dat_clean)
+
+# Name columns 
+pred_columns <- grep("cells|_P|_F", names(dat_clean))
+names(dat_clean)[pred_columns]
+```
+
+## 11. Save model diagnostics and predictions
+
+Ensure that the model and predictions are saved. Note: Even though the full model is run, saving the BART model will not include the trees. Unfortunately, it is not possible to save the trees.
+
+```{r projecting-predictions}
+# Save models and predictions
+invisible(bart_model$fit$state)  
+saveRDS(bart_model, paste0(myspecies, "/bart_model", method, ".rds"))
+
+# Save all rasters
+dir.create(paste0(myspecies, "/predictions/", method), recursive = TRUE, showWarnings = FALSE)
+write.csv(as.data.frame(dat_clean), paste0(myspecies, "/predictions/dat_clean", method, ".csv"), row.names = FALSE)
+cat("All predictions saved to:", paste0(myspecies, "/predictions/"), "\n")
+```

@@ -1,0 +1,326 @@
+---
+title: "Habitat Suitability Model - Mapping"
+author: "Maddie Thomson"
+date: "2025-07-25"
+output:
+  html_document:
+    df_print: paged
+---
+
+**Purpose**: This script generates spatial predictions using the trained BART model and defining the selected environmental variables ultimately producing habitat suitability maps. Model outputs are transformed into interpretable spatial visualizations that highlight areas where species are most likely to occur under the given environmental conditions. This code also saves data and maps that are used to generate a Shiny app.
+
+**Code to run before**: "4. BART.Rmd"
+
+**Code to run after**: "6. VarSelection.Rmd"
+
+------------------------------------------------------------------------
+
+## 1. Loading relevant data and libraries
+
+Three main components to load include: the cleaned data occurrence data, the environmental data, the model created from the BART script. Change species and method in "user settings" before running chunk.
+
+```{r warning=FALSE}
+# Load required libraries
+library(raster); library(sf); library(terra); library(fuzzySim); library(embarcadero); library(SOmap); library(data.table); library(sp); library(RColorBrewer); library(gstat); library(RColorBrewer)
+
+# Set working directory to where scirpt is saved
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# ------------------ USER SETTINGS ------------------
+# Define all species of interest
+myspecies_list <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
+
+# Select single target species 
+selected_species <- "Dissostichus mawsoni" 
+
+# Select variable selection method: "VIF" or "Spearman"
+method <- "VIF"  
+# ----------------------------------------------------
+
+# Remove space in myspecies 
+myspecies <- gsub("[ ()]", "", selected_species)
+
+# dat_clean includes the predictions, the full environmental variables, the presence points etc. (It has over 4 million rows) 
+dat_clean <- fread(paste0(myspecies, "/predictions/dat_clean", method, ".csv"))
+
+# dat_mod includes the subset data with the pseudo absences and the training and test data
+dat_mod <- fread(paste0(myspecies, "/dat_mod", method, ".csv"))
+
+# bart_model is the model developed in the script called "4. BART.Rmd"
+bart_model <- readRDS(paste0(myspecies, "/bart_model", method, ".rds"))
+
+# Load environment variables (both are loaded for compatibility)
+vars_cut <- rast("outputs/vars_cut.tif")
+vars_vif <- rast("outputs/vars_vif.tif")
+
+# Set 'env' based on chosen method (this is what the rest of the code will use)
+env <- if(method == "VIF") vars_vif else vars_cut
+
+```
+
+## 2. Creating Spatial Maps
+
+Mapping probabilities and favourability using BART outputs. Favourability means the species is not necessarily likely to be present, but rather that the environment is favourable to the species, even if it's absent. While Presence probability is the likelihood of finding the species at a given environment. Keep in mind, the maps generated use the full BART model and not the final model.
+
+```{r message=TRUE, warning=FALSE}
+# Convert the predictions dataframe to raster form for mapping 
+BART_P_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_P")], crs = "+proj=longlat +datum=WGS84")
+BART_P_uncert_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_P_uncert")], crs = "+proj=longlat +datum=WGS84")
+BART_F_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_F")], crs = "+proj=longlat +datum=WGS84")
+BART_F_uncert_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_F_uncert")], crs = "+proj=longlat +datum=WGS84")
+
+# Project to SO coordinates
+BART_F_mean_proj <- SOproj(BART_F_rast)
+BART_F_uncert_proj <- SOproj(BART_F_uncert_rast)
+BART_P_mean_proj <- SOproj(BART_P_rast)
+BART_P_uncert_proj <- SOproj(BART_P_uncert_rast)
+
+# load and project the presences points 
+presences <- dat_mod[dat_mod$presence == 1, ]
+presences_sp <- SpatialPoints(data.frame(x = presences$x, y = presences$y))
+crs(presences_sp) <- "+proj=longlat +datum=WGS84"
+presences_proj <- SOproj(presences_sp)
+
+# Define color palette and basemap
+my.palette.new <- rev(rocket(12))
+basemap <-SOmap(trim = -38)
+
+# Mapping probability 
+plot_prob <- function() {
+  plot(basemap)
+  plot(BART_P_mean_proj, col = my.palette.new, alpha = 0.7, add = TRUE)
+  plot(presences_proj, pch = 20, col = "blue", cex = 0.8, add = TRUE)
+}
+
+# Mapping probability with uncertainty 
+plot_prob_uncert <- function() {
+  plot(basemap)
+  plot(BART_P_uncert_proj, col = my.palette.new, alpha = 0.7, add = TRUE)
+  plot(presences_proj, pch = 20, col = "blue", cex = 0.8, add = TRUE)
+}
+
+# Mapping favourability
+plot_favourability <- function() {
+  plot(basemap)
+  plot(BART_F_mean_proj, col = my.palette.new, alpha = 0.7, add = TRUE)
+  plot(presences_proj, pch = 20, col = "blue", cex = 0.8, add = TRUE)
+}
+
+# Mapping favourability with uncertainty 
+plot_favourability_uncert <- function() {
+  plot(basemap)
+  plot(BART_F_uncert_proj, col = my.palette.new, alpha = 0.7, add = TRUE)
+  plot(presences_proj, pch = 20, col = "blue", cex = 0.8, add = TRUE)
+}
+
+# Create maps directory
+dir.create(paste0(myspecies, "/maps/"), recursive = TRUE, showWarnings = FALSE)
+
+# Save all the SOmap plots, presence probability and favourability and each uncertainties
+png(paste0(myspecies, "/maps/SO_presence_probability.png"), width = 1200, height = 900)
+plot_prob()
+dev.off()
+
+png(paste0(myspecies, "/maps/SO_presence_uncertainty.png"), width = 1200, height = 900)
+plot_prob_uncert()
+dev.off()
+
+png(paste0(myspecies, "/maps/SO_favourability.png"), width = 1200, height = 900)
+plot_favourability()
+dev.off()
+
+png(paste0(myspecies, "/maps/SO_favourability_uncertainty.png"), width = 1200, height = 900)
+plot_favourability_uncert()
+dev.off()
+
+cat("Maps saved to:", paste0(myspecies, "/maps/"), "\n")
+```
+
+## 3. Model and Prediction evaluation
+
+Evaluating the discrimination performance of your model predictions, both on the training data and test data, using Area Under the Curve of the ROC curve (AUC), threshold-dependent metrics, and Miller calibration (predicted probabilities matching observed outcomes).
+
+```{r message=FALSE, warning=FALSE}
+
+# Subset training and test sets 
+dat_train <- subset(dat_mod, fold == 1) # Fold 1 is the training data and fold 2 is the test data
+dat_test <- subset(dat_mod, fold == 2)
+
+# Extract raster predictions at training and test locations
+train_coords <- data.frame(x = dat_train$x, y = dat_train$y)
+test_coords <- data.frame(x = dat_test$x, y = dat_test$y)
+
+# Extract from the raster prediction values
+dat_train$BART_P <- raster::extract(BART_P_rast, train_coords)
+dat_test$BART_P <- raster::extract(BART_P_rast, test_coords)
+
+# Extract from the raster favourability values
+dat_train$BART_F <- raster::extract(BART_F_rast, train_coords)
+dat_test$BART_F <- raster::extract(BART_F_rast, test_coords)
+
+# Setup plotting layout for evaluation
+par(mfrow = c(3, 2), mar = c(5, 4, 2, 1))
+
+# Create output directory for results. Directory structure: species/evaluation/method
+dir.create(paste0(myspecies, "/evaluation/", method), recursive = TRUE, showWarnings = FALSE)
+
+# Save evaluation plots as PNG
+png(paste0(myspecies, "/evaluation/model_evaluation_plots.png"), width = 1200, height = 900)
+par(mfrow = c(3, 2), mar = c(5, 4, 2, 1))
+
+# Calculate evaluation metrics: 1) AUC - measures overall discrimination ability of the model
+# 2) threshold-dependent metrics - evaluates how well the model distinguishes presences and absences.
+# 3) Miller Calibration - fits logistic regression of observed ~ predicted
+auc_train <- modEvA::AUC(obs = dat_train$presence, pred = dat_train$BART_P, main = "Train")
+auc_test <- modEvA::AUC(obs = dat_test$presence, pred = dat_test$BART_P, main = "Test")
+thresh_train <- modEvA::threshMeasures(obs = dat_train$presence, pred = dat_train$BART_P, thresh = "maxTSS", measures = c("CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "kappa"), cex.axis = 0.7)
+thresh_test <- modEvA::threshMeasures(obs = dat_test$presence, pred = dat_test$BART_P, thresh = "maxTSS", measures = c("CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "kappa"), cex.axis = 0.7)
+calib_train <- modEvA::MillerCalib(obs = dat_train$presence, pred = dat_train$BART_P)
+calib_test <- modEvA::MillerCalib(obs = dat_test$presence, pred = dat_test$BART_P)
+dev.off()
+
+# Build the summary data.frame with all evaluation calculations
+model_eval_df <- data.frame(
+  Metric = c("AUC", "AUCratio", "meanPrecision", "Gini", "Threshold", "CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "Kappa", "Calibration_Intercept", "Calibration_Slope"),
+ 
+   Train = c(
+    auc_train$AUC,
+    auc_train$AUCratio,
+    auc_train$meanPrecision,
+    auc_train$GiniCoefficient,
+    thresh_train$Threshold,
+    thresh_train$ThreshMeasures["CCR", ],
+    thresh_train$ThreshMeasures["Sensitivity", ],
+    thresh_train$ThreshMeasures["Specificity", ],
+    thresh_train$ThreshMeasures["Precision", ],
+    thresh_train$ThreshMeasures["Recall", ],
+    thresh_train$ThreshMeasures["sTSS", ],
+    thresh_train$ThreshMeasures["skappa", ],
+    calib_train$intercept,
+    calib_train$slope
+  ),
+  Test = c(
+    auc_test$AUC,
+    auc_test$AUCratio,
+    auc_test$meanPrecision,
+    auc_test$GiniCoefficient,
+    thresh_test$Threshold,
+    thresh_test$ThreshMeasures["CCR", ],
+    thresh_test$ThreshMeasures["Sensitivity", ],
+    thresh_test$ThreshMeasures["Specificity", ],
+    thresh_test$ThreshMeasures["Precision", ],
+    thresh_test$ThreshMeasures["Recall", ],
+    thresh_test$ThreshMeasures["sTSS", ],
+    thresh_test$ThreshMeasures["skappa", ],
+    calib_test$intercept,
+    calib_test$slope
+  )
+)
+
+print(model_eval_df)
+
+# Save predictions
+write.csv(dat_train, paste0(myspecies, "/evaluation/train_predictions", method, ".csv"), row.names = FALSE)
+write.csv(dat_test, paste0(myspecies, "/evaluation/test_predictions", method, ".csv"), row.names = FALSE)
+write.csv(model_eval_df, paste0(myspecies, "/evaluation/modeldiagnostics", method, ".csv"), row.names = FALSE)
+cat("Evaluation results saved to:", paste0(myspecies, "/evaluation/"), "\n")
+```
+
+## 4. Comparison of two methods
+
+Comparing the model and prediction evaluations between the VIF and Spearman methods to determine best preforming model. The chosen method will be used in the subsequent script and to build the "best_model". This section can only be completed once both method model and predictions have been generated.
+
+```{r warning=FALSE}
+# Load data from other method (i.e., the method not used in this script) 
+method2 <- if(method == "VIF") "Spearman" else "VIF"
+env2 <- if(method == "VIF") vars_cut else vars_vif
+dat_clean <- fread(paste0(myspecies, "/predictions/dat_clean", method2, ".csv"))
+dat_mod2 <- fread(paste0(myspecies, "/dat_mod", method2, ".csv"))
+
+# Define training and test subsets 
+dat_train2 <- subset(dat_mod2, fold == 1) # Fold 1 is training data, fold 2 test data
+dat_test2 <- subset(dat_mod2, fold == 2)
+
+# Extract raster predictions at training and test locations
+train_coords2 <- data.frame(x = dat_train2$x, y = dat_train2$y)
+test_coords2 <- data.frame(x = dat_test2$x, y = dat_test2$y)
+
+# Convert dataframe to raster
+BART_P2_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_P")], crs = "+proj=longlat +datum=WGS84")
+BART_P2_uncert_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_P_uncert")], crs = "+proj=longlat +datum=WGS84")
+BART_F2_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_F")], crs = "+proj=longlat +datum=WGS84")
+BART_F2_uncert_rast <- rasterFromXYZ(dat_clean[, c("x", "y", "BART_F_uncert")], crs = "+proj=longlat +datum=WGS84")
+
+# Extract from the Raster objects
+dat_train2$BART_P <- raster::extract(BART_P2_rast, train_coords2)
+dat_test2$BART_P <- raster::extract(BART_P2_rast, test_coords2)
+
+# Extract favourability values
+dat_train2$BART_F <- raster::extract(BART_F2_rast, train_coords2)
+dat_test2$BART_F <- raster::extract(BART_F2_rast, test_coords2)
+
+# Now run evaluation
+par(mfrow = c(3, 2), mar = c(5, 4, 2, 1))
+
+# Create output directory for method2
+dir.create(paste0(myspecies, "/evaluation/", method2), recursive = TRUE, showWarnings = FALSE)
+
+# Save evaluation plots
+png(paste0(myspecies, "/evaluation/model_evaluation_plots_", method2, ".png"), width = 1200, height = 900)
+par(mfrow = c(3, 2), mar = c(5, 4, 2, 1))
+
+auc_train2 <- modEvA::AUC(obs = dat_train2$presence, pred = dat_train2$BART_P, main = "Train")
+auc_test2 <- modEvA::AUC(obs = dat_test2$presence, pred = dat_test2$BART_P, main = "Test")
+thresh_train2 <- modEvA::threshMeasures(obs = dat_train2$presence, pred = dat_train2$BART_P, thresh = "maxTSS", measures = c("CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "kappa"), cex.axis = 0.7)
+thresh_test2 <- modEvA::threshMeasures(obs = dat_test2$presence, pred = dat_test2$BART_P, thresh = "maxTSS", measures = c("CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "kappa"), cex.axis = 0.7)
+calib_train2 <- modEvA::MillerCalib(obs = dat_train2$presence, pred = dat_train2$BART_P)
+calib_test2 <- modEvA::MillerCalib(obs = dat_test2$presence, pred = dat_test2$BART_P)
+dev.off()
+
+# Build summary data.frame for method2
+model_eval_df2 <- data.frame(
+  Metric = c("AUC", "AUCratio", "meanPrecision", "Gini", "Threshold", "CCR", "Sensitivity", "Specificity", "Precision", "Recall", "TSS", "Kappa", "Calibration_Intercept", "Calibration_Slope"),
+  Train = c(
+    auc_train2$AUC,
+    auc_train2$AUCratio,
+    auc_train2$meanPrecision,
+    auc_train2$GiniCoefficient,
+    thresh_train2$Threshold,
+    thresh_train2$ThreshMeasures["CCR", ],
+    thresh_train2$ThreshMeasures["Sensitivity", ],
+    thresh_train2$ThreshMeasures["Specificity", ],
+    thresh_train2$ThreshMeasures["Precision", ],
+    thresh_train2$ThreshMeasures["Recall", ],
+    thresh_train2$ThreshMeasures["sTSS", ],
+    thresh_train2$ThreshMeasures["skappa", ],
+    calib_train2$intercept,
+    calib_train2$slope
+  ),
+  Test = c(
+    auc_test2$AUC,
+    auc_test2$AUCratio,
+    auc_test2$meanPrecision,
+    auc_test2$GiniCoefficient,
+    thresh_test2$Threshold,
+    thresh_test2$ThreshMeasures["CCR", ],
+    thresh_test2$ThreshMeasures["Sensitivity", ],
+    thresh_test2$ThreshMeasures["Specificity", ],
+    thresh_test2$ThreshMeasures["Precision", ],
+    thresh_test2$ThreshMeasures["Recall", ],
+    thresh_test2$ThreshMeasures["sTSS", ],
+    thresh_test2$ThreshMeasures["skappa", ],
+    calib_test2$intercept,
+    calib_test2$slope
+  )
+)
+
+# Save predictions and diagnostics for method2
+write.csv(dat_train2, paste0(myspecies, "/evaluation/train_predictions", method2, ".csv"), row.names = FALSE)
+write.csv(dat_test2, paste0(myspecies, "/evaluation/test_predictions", method2, ".csv"), row.names = FALSE)
+write.csv(model_eval_df2, paste0(myspecies, "/evaluation/modeldiagnostics", method2, ".csv"), row.names = FALSE)
+
+cat("Evaluation results saved to:", paste0(myspecies, "/evaluation/", method2), "\n")
+
+print(model_eval_df2)
+print(model_eval_df)
+```

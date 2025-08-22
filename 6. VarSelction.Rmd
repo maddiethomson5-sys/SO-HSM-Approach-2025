@@ -1,0 +1,526 @@
+---
+title: "Habitat Suitability Mapping - Variable Selection"
+author: "Maddie Thomson"
+date: "2025-07-25"
+output:
+  html_document:
+    df_print: paged
+---
+
+**Purpose**: This script defines the predictor variables for the habitat model by comparing multiple variable selection approaches (backward selection, forward selection, and the embarcadero package). After selecting the most informative variables, the model is fitted and evaluated. The workflow generates response curves, prediction maps, and habitat suitability outputs, along with diagnostics and performance metrics. Variable importance rankings are also provided to identify the environmental drivers shaping species distributions.
+
+**Code to run before**: "4.BART" and "5.HSM"
+
+**Code to run after**: "app.R" (if applicable)
+
+## 1. Loading Relevent Data and Libraries
+
+Change species and method in "user settings" before running chunk. This step also sets the output directory for the Shiny app, which will be populated with results throughout the script.
+
+```{r message=FALSE, warning=FALSE}
+library(terra); library(collinear); library(embarcadero); library(modEvA); library(raster); library(SOmap); library(RColorBrewer); library(rstudioapi); library(SOmap); library(viridis)
+install.packages('foreach', dep = T)
+url <- 'http://www.rob-mcculloch.org/chm/nonlinvarsel_0.0.1.9001.tar.gz'
+download.file(url, destfile = 'temp')
+library(nonlinvarsel)
+
+# Set working directory to where this script is saved.
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Set working directory for the app, as plots will be pulled from these files to generate the website. 
+app_dir <- file.path(getwd(), "App")
+
+# ------------------ USER SETTINGS ------------------
+# Define all species of interest
+myspecies_list <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
+
+# Change species of interest here
+selected_species <- "Dissostichus mawsoni" 
+
+# Select variable selection method: "VIF" or "Spearman"
+method <- "VIF"  
+# ----------------------------------------------------
+
+# Define species and clean names function
+clean_name <- function(x) gsub("[ ()]", "", x)
+
+# Select species and load data
+myspecies <- clean_name(selected_species)
+
+# Load all species data
+species_data_list <- list()
+for(species in myspecies_list) {
+  species_short <- clean_name(species)
+  suffix <- if(method == "VIF") "varsVIF_2000_vif.csv" else "varscut_2000_spearman.csv"
+  filename <- paste0("outputs/", species_short, suffix)
+  
+  if(file.exists(filename)) {
+    species_data_list[[species_short]] <- fread(filename)
+    cat("Loaded data for", species, "from", filename, "\n")
+  }
+}
+
+# Dat is raw data without predictions with over 4 million rows. 
+dat <- species_data_list[[myspecies]]
+
+# Define the dataset that was determined to produce the best model. 
+vars_cut <- terra::rast("outputs/vars_cut.tif")
+vars_vif <- terra::rast("outputs/vars_vif.tif")
+env <- if(method == "VIF") vars_vif else vars_cut
+var_names <- names(env)
+
+# dat_clean includes the predictions, the full environmental variables, the presence points etc. (It can have over 4 million rows)
+dat_clean <- fread(paste0(myspecies, "/predictions/dat_clean", method, ".csv"))
+
+# dat_mod includes the subset data with the pseudo absences and the training and test data. It has 10,000 rows 
+dat_mod <- fread(paste0(myspecies , "/dat_mod", method, ".csv"))
+
+# Load the model variables seleceted, if you have already saved them. Load the best model prediction if already have them. Load the best model if you already have it. 
+#varsel_emb <- fread(paste0(myspecies, "/varselection/varsel_emb", method, ".csv"))
+#dat3 <- fread(paste0(myspecies, "/predictions/best_modelpred", method, ".csv"))
+#best_model <- readRDS(paste0(myspecies, "/varselection/mod_varsel_embspearman.rds")) #change name if needed 
+```
+
+## 2. Variable Selection
+
+This section performs variable selection through three different methods for the species distribution model. It identifies subsets of variables, and saves the selected variables from each method for use in subsequent modeling and mapping.
+
+```{r message=FALSE, warning=FALSE}
+# Set up data
+dir.create(paste0(myspecies, "/varselection/", method), recursive = TRUE, showWarnings = FALSE)
+dat_all <- as.data.frame(dat_clean)
+dat_sel <- as.data.frame(dat_mod)
+var_names <- names(env)
+set.seed(2222)  # to make the next result reproducible
+
+# determine the selected variables using the embarcadero package and the data set with 10000 rows to reduce computational laod. This line will take time. 
+varsel_emb <- (embarcadero::variable.step(x.data = dat_sel[ ,var_names], y.data = dat_sel$presence))
+varsel_emb <- as.character(varsel_emb$x)
+
+# Determine selected varibles using hte with 'nonlinvarsel' package and the dataset with 10000 rows to reduce computational rows. 
+names(dat_all)
+dat_all_selected <- filter(dat_all, selected == TRUE)
+complete_rows <- complete.cases(dat_all_selected[, "BART_P"])  # required below
+
+# Forward selection:
+varsel_fwd <- nonlinvarsel::vsf(dat_all_selected[complete_rows, var_names], dat_all_selected[complete_rows, "BART_P"])
+
+# Backward selection:
+varsel_bwd <- nonlinvarsel::vsb(dat_all_selected[complete_rows, var_names], dat_all_selected[complete_rows, "BART_P"])
+
+# Map forward and backward variable selection
+par(mar = c(5, 4, 2, 1), mfrow = c(2, 1))
+
+{plot(varsel_fwd, cex.axis = 0.6)
+abline(h = 0.95, lty = 2, col = "lightblue3")} # minimum cumulative R-squared for variable to be selected
+
+{plot(varsel_bwd, cex.axis = 0.6)
+abline(h = 0.95, lty = 2, col = "lightblue3")} # minimum cumulative R-squared for variable to be selected
+
+R2_thresh <- 0.95  # minimum cumulative R-squared for variable to be selected. This threshold may need to be changed depending on the data 
+
+# forward minimal subset:
+varsel_fwd_ind <- min(which(sort(varsel_fwd$R2) > R2_thresh))
+varsel_fwd_ind
+varsel_fwd_names <- names(print(varsel_fwd))[1:varsel_fwd_ind]
+varsel_fwd_names
+
+# backward minimal subset:
+varsel_bwd_ind <- min(which(sort(varsel_bwd$R2) > R2_thresh))
+varsel_bwd_ind
+varsel_bwd_names <- names(print(varsel_bwd))[1:varsel_bwd_ind]
+varsel_bwd_names
+
+#save all selection methods
+write.csv(varsel_fwd_names, paste0(myspecies, "/varselection/varsel_fwd", method, ".csv"), row.names = FALSE)
+write.csv(varsel_bwd_names, paste0(myspecies, "/varselection/varsel_bwd", method, ".csv"), row.names = FALSE)
+write.csv(varsel_emb, paste0(myspecies, "/varselection/varsel_emb", method,".csv"), row.names = FALSE)
+```
+
+## 3. Model Building
+
+This section builds models using the identified variables in section 2. All models are saved.
+
+```{r message=FALSE, warning=FALSE}
+# build models with the selected variables from emb and forward and backwards
+mod_varsel_emb <- dbarts::bart(x.train = dat_sel[ , varsel_emb], y.train = dat_sel[ , "presence"], keeptrees = TRUE, seed = 654)
+summary(mod_varsel_emb)
+emb_varscore <- embarcadero::varimp(mod_varsel_emb, plots = FALSE) 
+
+mod_varsel_fwd <- dbarts::bart(x.train = dat_sel[ , varsel_fwd_names], y.train = dat_sel[ , "presence"], keeptrees = TRUE, seed = 654)
+summary(mod_varsel_fwd)
+fwd_varscore <- embarcadero::varimp(mod_varsel_fwd, plots = FALSE)
+
+mod_varsel_bwd <- dbarts::bart(x.train = dat_sel[ , varsel_bwd_names], y.train = dat_sel[ , "presence"], keeptrees = TRUE, seed = 654)
+summary(mod_varsel_bwd)
+bwd_varscore <- embarcadero::varimp(mod_varsel_bwd, plots = FALSE)
+
+# save all three models to disk:
+invisible(mod_varsel_emb$fit$state) 
+invisible(mod_varsel_fwd$fit$state)
+invisible(mod_varsel_bwd$fit$state)
+
+saveRDS(mod_varsel_emb, paste0(myspecies, "/varselection/mod_varsel_emb", method, ".rds"))
+saveRDS(mod_varsel_fwd, paste0(myspecies, "/varselection/mod_varsel_fwd", method, ".rds"))
+saveRDS(mod_varsel_bwd, paste0(myspecies, "/varselection/mod_varsel_bwd", method, ".rds"))
+
+# save all three model variable of importance scores 
+write.csv(emb_varscore, paste0(myspecies, "/varselection/varsel_embScores", method, ".csv"), row.names = FALSE)
+write.csv(fwd_varscore, paste0(myspecies, "/varselection/varsel_fwdScores", method, ".csv"), row.names = FALSE)
+write.csv(bwd_varscore, paste0(myspecies, "/varselection/varsel_bwdScores", method, ".csv"), row.names = FALSE)
+```
+
+## 4. Compare Models
+
+Comparing model metrics between the OG Bart model, the forward selection, the backward selection, and embarcadero step selection models.
+
+```{r message=FALSE, warning=FALSE}
+# model performance:
+par(mfrow = c(2, 2))
+modEvA::AUC(model = bart_model, simplif = TRUE, main = "mod_full")
+modEvA::AUC(model = mod_varsel_emb, simplif = TRUE, main = "mod_varsel_emb")
+modEvA::AUC(model = mod_varsel_fwd, simplif = TRUE, main = "mod_varsel_fwd")
+modEvA::AUC(model = mod_varsel_bwd, simplif = TRUE, main = "mod_varsel_bwd")
+
+modEvA::MillerCalib(model = bart_model, main = "mod_full")
+modEvA::MillerCalib(model = mod_varsel_emb, main = "mod_varsel_emb")
+modEvA::MillerCalib(model = mod_varsel_fwd, main = "mod_varsel_fwd")
+modEvA::MillerCalib(model = mod_varsel_bwd, main = "mod_varsel_bwd")
+```
+
+## 5. Define Best Model
+
+Define the best model and specify the selected variables based on the prior variable selection results. The script then organizes variable importance scores with descriptive names, depth information, and variants, and saves these annotated scores to CSV files for downstream analysis and integration into the Shiny app.
+
+```{r}
+# Define the final model and selected variables
+# Update these to the best-performing model and its selected variables
+best_model     <- mod_varsel_emb    # best model
+vars_selected  <- varsel_emb        # variables chosen for the best model
+bestvars_scores <- emb_varscore     # variable importance scores for the best model
+
+# Define variables with Bio-ORACLE descriptions 
+descriptions <- c(
+  chl = "Chlorophyll", clt = "Total Cloud Fraction", dfe = "Dissolved Iron", mlotst = "Mixed Layer Depth", no3 = "Nitrate", o2 = "Dissolved Molecular Oxygen", ph = "pH", phyc = "Phytoplankton", po4 = "Phosphate", si = "Silicate", siconc = "Sea Ice Cover", sithick = "Sea Ice Thickness", so = "Salinity", sws = "Sea Water Speed", tas = "Air Temperature", terrain = "Terrain Ruggedness Index", thetao = "Ocean Temperature", bathymetry = "Bathymetry")
+
+# Defining depths within variables
+depth_lookup <- c( surf = "Surface", benth = "Benthic")
+
+# Define scores for best model, ready to be added into the shiny app. 
+bestvars_scores <- bestvars_scores %>%
+  dplyr::rename(Name = names) %>%
+  separate(Name, into = c("var_short", "Variant", "depth_key"), sep = "_", fill = "right", remove = FALSE) %>%
+  mutate(
+    Description = descriptions[var_short],
+    Depth = ifelse(!is.na(depth_lookup[depth_key]), depth_lookup[depth_key], ""),
+    Variant = ifelse(!Variant %in% c("mean", "min", "max"), "", Variant)
+  ) %>%
+  select(Name, Description, Value = varimps, Depth, Variant)
+
+# Save scores to app folder for shiny app 
+species_data_dir <- file.path(app_dir, "Data", myspecies)
+
+# Create the folder if it doesn't exist
+dir.create(species_data_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Save scores both in the app folder and in current folder
+write.csv(bestvars_scores, file = file.path(species_data_dir, "bestvars_scores.csv"), row.names = FALSE)
+write.csv(bestvars_scores, paste0(myspecies, "/varselection/bestvars_scores", ".csv"), row.names = FALSE)
+```
+
+## 6. Predictions with the model of choice
+
+Use the best model to generate spatial predictions of habitat suitability across the study region using the entire raster for the variables defined. ⚠️ Warning: the raster is very large, so predictions must be processed in chunks. This can be time-consuming, typically taking over one hour.
+
+```{r message=FALSE, warning=FALSE}
+
+#  The 'embarcadero' package predict function has been edited to work on data frames 
+source("https://raw.githubusercontent.com/AMBarbosa/unpackaged/master/predict_bart_df") 
+
+# Convert environmental raster (env) into a dataframe (env_df) where each row is a pixel.
+env_df <- as.data.frame(env, xy = TRUE)  # Ensure coords are columns `x` and `y`
+
+# Define chunk prediciton function - Each chunk is processed independently. Results are stored in a list.
+predict_bart_simple_df <- function(model, env_df, vars_selected, quantiles = c(0.025, 0.975), chunk_size = 100000) {
+  
+  n_rows <- nrow(env_df)
+  all_results <- list()
+  
+  # Env_df has columns 'x' and 'y' for coordinates and all other columns are predictor variables
+  
+  for(i in seq(1, n_rows, by = chunk_size)) {
+    end_chunk <- min(i + chunk_size - 1, n_rows)
+    chunk_indices <- i:end_chunk
+    
+    cat("Processing rows", i, "to", end_chunk, "of", n_rows, "\n")
+    
+    chunk_env <- env_df[chunk_indices, ]
+    
+    # Remove rows with NA in predictor columns (exclude coords x,y)
+  valid_rows <- complete.cases(chunk_env[, vars_selected, drop = FALSE])
+    
+    if (sum(valid_rows) > 0) {
+  chunk_env_clean <- chunk_env[valid_rows, ]  # still has x and y
+
+  chunk_pred <- predict_bart_df(
+  model,
+  chunk_env_clean[, vars_selected, drop = FALSE],
+  quantiles = quantiles
+)
+
+  all_results[[length(all_results) + 1]] <- data.frame(
+  x = chunk_env_clean$x,
+  y = chunk_env_clean$y,
+  mean = chunk_pred[, 1],
+  lower = chunk_pred[, 2],
+  upper = chunk_pred[, 3]
+)
+}
+    
+    gc()  # Force garbage collection
+  }
+  
+  # Combine all predictions
+  all_results <- do.call(rbind, all_results)
+  
+  return(all_results)
+}
+
+best_modelpreds <- predict_bart_simple_df(model = best_model, env_df = env_df, vars_selected = vars_selected, quantiles = c(0.025, 0.975))
+
+head(best_modelpreds)  # mean posterior prediction, and the lower and upper bounds of the credibility interval specified in 'quantiles' above
+
+best_modelpreds$uncert <- best_modelpreds[ , 5] - best_modelpreds[ , 4]  # width of the credibility interval = uncertainty of the prediction at each site
+
+# change to more self-explanatory column names:
+names(best_modelpreds) <- c("x", "y", "BART_P", "BART_P_lower", "BART_P_upper", "BART_P_uncert")
+
+# Add unique row IDs to both data frames before joining
+dat3 <- dat %>% mutate(row_id = row_number())
+preds3 <- best_modelpreds %>% mutate(row_id = row_number())
+summary(best_modelpreds)
+
+# Find any rows in dat2 missing from preds2 by row_id 
+missing_rows <- anti_join(dat3, preds3, by = "row_id")
+
+# Put preds2 and dat2 together for a final dataframe 
+dat3 <- dat3 %>% filter(!row_id %in% missing_rows$row_id)
+dat3 <- data.frame(dat3, preds3[,3:6])
+
+dat3$BART_F <- fuzzySim::Fav(pred = dat3$BART_P, sample.preval = fuzzySim::prevalence(model = best_model))
+dat3$BART_F_lower <- fuzzySim::Fav(pred = dat3$BART_P_lower, sample.preval = fuzzySim::prevalence(model = best_model))
+dat3$BART_F_upper <- fuzzySim::Fav(pred = dat3$BART_P_upper, sample.preval = fuzzySim::prevalence(model = best_model))
+dat3$BART_F_uncert <- dat3$BART_F_upper - dat3$BART_F_lower  
+
+# Save the best model predictions 
+head(dat3)
+write.csv(as.data.frame(dat3), paste0(myspecies, "/predictions/best_modelpreds", method, ".csv"), row.names = FALSE)
+
+```
+
+## 7. Saving Best Predictions
+
+Prediction rasters are saved and able to be in a downloadable format for the shiny app.
+
+```{r}
+# Convert predictions to raster and save data for Shiny App
+BART_Predictions <- rast(dat3)
+
+# Save raster in species folders
+writeRaster(BART_Predictions$BART_F_uncert, filename = paste0(myspecies, "/Predictions/Best_ModelFavourabilityUncertainty.tif"), overwrite = TRUE)
+
+writeRaster(BART_Predictions$BART_F, filename = paste0(myspecies, "/Predictions/Best_ModelFavourabilityMean.tif"), overwrite = TRUE)
+
+# Define raster in app species folders
+species_raster_pred <- file.path(app_dir, "Data", myspecies)
+dir.create(species_raster_pred, recursive = TRUE, showWarnings = FALSE)
+
+# Save rasters for shiny app
+writeRaster(BART_Predictions$BART_F_uncert, filename = file.path(species_raster_pred, "Best_ModelFavourabilityUncertainty.tif"), overwrite = TRUE)
+writeRaster(BART_Predictions$BART_F, filename = file.path(species_raster_pred, "Best_ModelFavourabilityMean.tif"), overwrite = TRUE)
+```
+
+## 8. Plot Predictions and Save to Shiny App Folder
+
+This script generates high-resolution maps of habitat suitability and uncertainty. It converts model outputs into rasters, projects both the predictions and observed presence points, and overlays them on a Southern Ocean basemap. The maps are saved as PNG files both locally and in the Shiny app folder to enable interactive zooming.
+
+```{r message=FALSE, warning=FALSE}
+# Plot predictions
+BART_F_best_rast <- rasterFromXYZ(dat3[, c("x", "y", "BART_F")], crs = "+proj=longlat +datum=WGS84")
+BART_F_best_uncert_rast <- rasterFromXYZ(dat3[, c("x", "y", "BART_F_uncert")], crs = "+proj=longlat +datum=WGS84")
+BART_F_best <- SOproj(BART_F_best_rast)
+BART_F_best_uncert <- SOproj(BART_F_best_uncert_rast)
+
+# Load and project the presences points 
+presences <- dat3[dat3$presence == 1, ]
+presences_sp <- SpatialPoints(data.frame(x = presences$x, y = presences$y))
+crs(presences_sp) <- "+proj=longlat +datum=WGS84"
+presences_proj <- SOproj(presences_sp)
+
+# Define components for plotting 
+basemap <- SOmap(trim = -40)
+my.palette.new <- rev(rocket(12))
+breaks = c(0.2, 0.4, 0.6, 0.8)
+
+# High-quality plotting function for favourability 
+plot_favprob <- function() {
+  plot(basemap)
+  plot(BART_F_best, col = my.palette.new, alpha = 0.8, legend = FALSE, add = TRUE)
+  plot(presences_proj, pch = 21, bg = "green", cex = 0.7, add = TRUE)
+  legend(x = 3000000, y = -5000000, legend = "Presences", pch = 21, pt.bg = "green", pt.cex = 0.7, bty = "n")
+  SOleg(x = runif(100), position = "topright", col = my.palette.new,
+      breaks = breaks, trim = -38, label = "Habitat Suitability Probability",
+      rnd = 1, type = "continuous")
+}
+
+# Save plot 
+png(paste0(myspecies, "/maps/SO_fav_best_model.png"), width = 2000, height = 2000, res = 300)
+plot_favprob()
+dev.off()
+
+# High-quality plotting function for favourability uncertainty 
+plot_favprobuncert <- function() {
+  plot(basemap)
+  plot(BART_F_best_uncert, col = my.palette.new, alpha = 0.8, legend = FALSE, add = TRUE)
+  plot(presences_proj, pch = 21, bg = "green", cex = 0.7, add = TRUE)
+  legend(x = 3000000, y = -5000000, legend = "Presences", pch = 21, pt.bg = "green", pt.cex = 0.7, bty = "n")
+  SOleg(x = runif(100), position = "topright", col = my.palette.new,
+      breaks = breaks, trim = -38, label = "Habitat Suitability Probability",
+      rnd = 1, type = "continuous")
+}
+
+# Save plot 
+png(paste0(myspecies, "/maps/SO_fav_best_modeluncert.png"), width = 2000, height = 2000, res = 300)
+plot_favprobuncert()
+dev.off()
+
+# Save plot to the Shiny App folder 
+# Get the directory where this script is located
+script_dir <- dirname(rstudioapi::getActiveDocumentContext()$path)
+
+# Path to the App's www folder
+app_dir <- file.path(script_dir, "App")
+www_dir <- file.path(app_dir, "www")
+
+# Path to this species' maps folder
+species_map_dir <- file.path(www_dir, myspecies, "maps")
+
+# Create the folder if it doesn't exist
+dir.create(species_map_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Define full path for the image
+png_filename <- file.path(species_map_dir, "SO_fav_best_model.png")
+png_filename2 <- file.path(species_map_dir, "SO_fav_best_modeluncert.png")
+
+# Save the plots
+png(png_filename, width = 2000, height = 2000, res = 300)
+plot(plot_favprob())
+dev.off()
+
+png(png_filename2, width = 2000, height = 2000, res = 300)
+plot(plot_favprobuncert())
+dev.off()
+
+cat("Saved plot to:", png_filename, "\n")
+
+```
+
+## 9. Plot Response Curves Using the Selected Best Model
+
+This section generates response curves for each predictor variable to be displayed in the Shiny app. ⚠️ Warning**:** Looping through all variables at once can be very memory-intensive. To avoid overloading your computer, run each variable individually rather than executing the entire chunk at once.
+
+```{r message=FALSE, warning=FALSE}
+# Define the species-specific output folder within the Shiny app for saving curves
+out_dir <- file.path(app_dir, "Outputs")
+
+# Create the folder for each species if it doesn't exist
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+species_folders <- file.path(out_dir, clean_name(myspecies_list))
+
+# Define the beat model predictions to plot the species respons. 
+mod <- best_model  # or any other BART model you have in your workspace
+
+# Get the variables in that model:
+vars <- colnames(mod$varcount)
+vars
+
+# Save response plot for 1st variable 
+partial_1 <- embarcadero::partial(mod, x.vars = vars[1], trace = FALSE)
+plot_obj1 <- partial_1[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[1], "_response.png"), plot = plot_obj1, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[1], "_response.png"), plot = plot_obj1, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 2nd variable 
+partial_2 <- embarcadero::partial(mod, x.vars = vars[2], trace = FALSE)
+plot_obj2 <- partial_2[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[2], "_response.png"), plot = plot_obj2, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[2], "_response.png"), plot = plot_obj2, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 3rd variable 
+partial_3 <- embarcadero::partial(mod, x.vars = vars[3], trace = FALSE)
+plot_obj3 <- partial_3[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[3], "_response.png"), plot = plot_obj3, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[3], "_response.png"), plot = plot_obj3, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 4th variable 
+partial_4 <- embarcadero::partial(mod, x.vars = vars[4], trace = FALSE)
+plot_obj4 <- partial_4[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[4], "_response.png"), plot = plot_obj4, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[4], "_response.png"), plot = plot_obj4, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 5th variable 
+partial_5 <- embarcadero::partial(mod, x.vars = vars[5], trace = FALSE)
+plot_obj5 <- partial_5[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[5], "_response.png"), plot = plot_obj5, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[5], "_response.png"), plot = plot_obj5, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 6th variable 
+partial_6 <- embarcadero::partial(mod, x.vars = vars[6], trace = FALSE)
+plot_obj6 <- partial_6[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[6], "_response.png"), plot = plot_obj6, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[6], "_response.png"), plot = plot_obj6, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+
+# Save response plot for 7th variable 
+partial_7 <- embarcadero::partial(mod, x.vars = vars[7], trace = FALSE)
+plot_obj7 <- partial_7[[1]]
+ggsave(paste0(myspecies, "/varselection/", vars[7], "_response.png"), plot = plot_obj7, width = 8, height = 6, dpi = 300)
+ggsave(paste0(vars[7], "_response.png"), plot = plot_obj7, path = file.path(app_dir, "Outputs", myspecies), width = 8, height = 6, dpi = 300)
+```
+
+## 10. Calculate Model Performance
+
+This script extracts key performance metrics and diagnostics from the selected best-performing model. It parses the model summary to retrieve AUC, cutoff, TSS, and type I/II error rates, organizes them into a data frame, and saves the results for the Shiny app.
+
+```{r message=FALSE, warning=FALSE}
+# Save model performance and diagnostics for selected best preforming model
+sum_text <- capture.output(summary(best_model))
+writeLines(sum_text, "bart_summary.txt")
+sum_lines <- readLines("bart_summary.txt")
+
+# Extract the numbers using regex
+auc <- as.numeric(sub(".*AUC =\\s*", "", sum_lines[grep("AUC =", sum_lines)]))
+cutoff <- as.numeric(sub(".*Cutoff =\\s*", "", sum_lines[grep("Cutoff =", sum_lines)]))
+tss <- as.numeric(sub(".*TSS =\\s*", "", sum_lines[grep("TSS =", sum_lines)]))
+type1 <- as.numeric(sub(".*type I error rate:  ", "", sum_lines[grep("type I error", sum_lines)]))
+type2 <- as.numeric(sub(".*type II error rate:  ", "", sum_lines[grep("type II error", sum_lines)]))
+
+# Combine into a data frame
+metrics <- data.frame( AUC = auc,
+  Cutoff = cutoff,
+  TSS = tss,
+  Type_I_error = type1,
+  Type_II_error = type2)
+
+metrics_df <- data.frame(
+  Metric = names(metrics),
+  Value = unlist(metrics)
+)
+
+metrics_df
+
+write.csv(as.data.frame(metrics_df), paste0(myspecies, "/evaluation/best_modeldiagnostics.csv"), row.names = FALSE)
+write.csv(metrics_df, file = file.path(species_data_dir, "best_modeldiagnostics.csv"), row.names = FALSE)
+
+```
+
+\`\`\`

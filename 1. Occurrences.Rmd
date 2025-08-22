@@ -1,0 +1,271 @@
+---
+title: Habitat Suitability Model - Occurrence Data Downloading and Cleaning
+Author: Maddie Thomson
+Date: 2025-07-14
+output: html_notebook
+---
+
+**Purpose:** Download, clean, and merge OBIS/GBIF occurrence data for Southern Ocean species distribution modeling. This script handles data acquisition, spatial filtering, coordinate cleaning, and temporal filtering to prepare occurrence data for habitat suitability modeling.
+
+**Code to run after:** "2. Environmental.R"
+
+## 1. Setup and Spatial Boundary Definition
+
+This section loads relevant libraries and defines spatial parameters of the area of interest.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load required libraries
+library(robis); library(terra); library(ggplot2); library(sf); library(dplyr); library(rgbif); library(CoordinateCleaner) 
+
+# Set working directory to where the script is saved
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Define southern ocean area - This WKT string defines a large polygon surrounding the Southern Ocean, this will be used to filter occurrence records and variables so only those within this region are included. 
+SO_polygon <- "POLYGON((180 -44.3,173 -44.3,173 -47.5,170 -47.5,157 -47.5,157 -45.9,150 -45.9,150 -47.5,143 -47.5,143 -45.8,140 -45.8,140 -44.5,137 -44.5,137 -43,135 -43,135 -41.7,131 -41.7,131 -40.1,115 -40.1,92 -40.1,92 -41.4,78 -41.4,78 -42.3,69 -42.3,69 -43.3,47 -43.3,47 -41.7,30 -41.7,12 -41.7,12 -40.3,10 -40.3,10 -38.3,-5 -38.3,-5 -38.9,-9 -38.9,-9 -40.2,-13 -40.2,-13 -41.4,-21 -41.4,-21 -42.5,-39 -42.5,-39 -40.7,-49 -40.7,-49 -48.6,-54 -48.6,-54 -55.7,-62.7972582608082 -55.7,-64 -55.7,-64 -57.8,-71 -57.8,-71 -58.9,-80 -58.9,-80 -40,-125 -40,-167 -40,-167 -42.6,-171 -42.6,-171 -44.3,-180 -44.3,-180 -90, 0 -90,180 -90,180 -44.3))"
+SO_polygon_geom <- st_as_sfc(SO_polygon, crs = 4326)  # Convert text to spatial geometry
+SO_vect <- project(vect(SO_polygon_geom), "EPSG:4326") # Convert to SpatVector and ensure correct CRS
+```
+
+------------------------------------------------------------------------
+
+## 2. Species Definition and Taxonomic Validation
+
+This section defines the target species and validates their taxonomic names using GBIF's name backbone service.
+
+```{r species-definition}
+# Define all species of interest 
+myspecies <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
+species_vec <- myspecies  
+
+# Use GBIF's name backbone to get taxon keys (needed for download queries)
+taxon_keys <- sapply(species_vec, function(x) name_backbone(x)$usageKey) 
+taxon_keys <- taxon_keys[!is.na(taxon_keys)]  # Drop any species where the key couldn't be found
+
+# Display validated species and their taxon keys
+cat("Validated species and taxon keys:\n")
+for(i in 1:length(species_vec)) {
+  if(!is.na(taxon_keys[i])) {
+    cat(species_vec[i], ": ", taxon_keys[i], "\n")
+  } else {
+    cat(species_vec[i], ": NOT FOUND\n")
+  }
+}
+```
+
+------------------------------------------------------------------------
+
+## 3. Data Acquisition from OBIS and GBIF
+
+Download occurrence data from two major biodiversity databases, applying spatial and quality filters. Additional information on OBIS and GBIF can be found here: <https://www.gbif.org/> and <https://obis.org/>
+
+```{r data-acquisition}
+# Get occurrence data from OBIS and GBIF within the defined polygon
+cat("Downloading data from OBIS...\n")
+obis_results <- robis::occurrence(scientificname = species_vec, geometry = SO_polygon)
+cat("OBIS records downloaded:", nrow(obis_results), "\n")
+
+## GBIF: Initiate a download request for all species, filtered to within the polygon
+cat("Initiating GBIF download request...\n")
+
+# Note: credentials must be your GBIF account login
+gbif_results <- occ_download(
+  pred("hasGeospatialIssue", FALSE),           # Filter out records with known geolocation issues
+  pred("hasCoordinate", TRUE),                 # Keep only records with coordinates
+  pred("occurrenceStatus", "PRESENT"),         # Only presence data
+  pred_in("taxonKey", taxon_keys),             # Limit to our species
+  pred_within(SO_polygon),                     # Only records within the polygon
+  user = "",
+  pwd = "",                                    # WARNING: do not hard-code passwords in shared code
+  email = ""
+)
+
+# Wait for the download to complete and then import it into R
+cat("Waiting for GBIF download to complete...\n")
+rgbif::occ_download_wait(gbif_results)
+gbif_data <- rgbif::occ_download_get(gbif_results) %>%
+  rgbif::occ_download_import()
+cat("GBIF records downloaded:", nrow(gbif_data), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 4. Data Standardization and Merging
+
+This section standardizes column names and formats between OBIS and GBIF data sets, then merges them into a single data set.
+
+```{r data-standardization}
+# Define common columns to keep from both datasets
+obis_cols <- c("scientificName", "decimalLatitude", "decimalLongitude",
+               "basisOfRecord", "year", "issues")
+gbif_cols <- c("species", "decimalLatitude", "decimalLongitude",
+               "basisOfRecord", "year", "issues")
+
+# Select + clean OBIS data
+obis_selected <- obis_results %>%
+  dplyr::select(any_of(obis_cols)) %>%
+  dplyr::mutate(year = as.factor(year), source = "obis")
+
+# Select + clean GBIF data
+gbif_selected <- gbif_data %>%
+  dplyr::select(any_of(gbif_cols)) %>%
+  dplyr::mutate(year = as.factor(year),
+         source = "gbif",
+         scientificName = species) %>%
+  dplyr::select(-species)
+
+# Merge datasets into a single dataframe
+merged_data <- bind_rows(obis_selected, gbif_selected)
+cat("Total merged records:", nrow(merged_data), "\n")
+cat("Records by source:\n")
+table(merged_data$source)
+```
+
+------------------------------------------------------------------------
+
+## 5. Coordinate Cleaning and Quality Control
+
+This section applies automated coordinate cleaning protocols to remove erroneous records and ensure data quality.
+
+```{r coordinate-cleaning}
+# Convert coordinate columns to numeric
+merged_data_clean <- merged_data %>%
+  mutate(
+    decimalLatitude = as.numeric(decimalLatitude),
+    decimalLongitude = as.numeric(decimalLongitude))
+
+# Apply a suite of cleaning tests for geographic accuracy
+cat("Applying coordinate cleaning protocols...\n")
+cleaned_coords_data <- clean_coordinates(
+  x = merged_data_clean,
+  lon = "decimalLongitude",
+  lat = "decimalLatitude",
+  species = "scientificName", # Important for cc_outl
+  tests = c("cap", "cent", "con", "dupl", "equ", "gbif", "inst", "sea", "zeros"), 
+  value = "clean", # Returns clean data
+  verbose = TRUE)
+
+# Remove rows if scientificName is NA
+cleaned_coords_data <- cleaned_coords_data[!is.na(cleaned_coords_data["scientificName"]),]
+
+cat("Records after cleaning:", nrow(cleaned_coords_data), "\n")
+cat("Records removed during cleaning:", nrow(merged_data_clean) - nrow(cleaned_coords_data), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 6. Temporal Analysis and Filtering
+
+This section examines the temporal distribution of occurrence records and aligns them with the period of available environmental data. Occurrence data will be filtered to match the temporal coverage of the Bio-ORACLE data set (2000–2020), ensuring consistency between species records and environmental variables.
+
+```{r temporal-analysis}
+# Convert year to numeric and save cleaned data
+cleaned_coords_data <- cleaned_coords_data %>%
+  mutate(year = as.numeric(as.character(year))) 
+
+# Create histogram to check spread of all years (1902-2023)
+cat("Creating temporal distribution plot for all data...\n")
+ggplot(cleaned_coords_data, aes(x = year, fill = scientificName)) +
+  geom_histogram(binwidth = 1, color = "black") +
+  labs(title = "Species Composition by Year (All Data)",
+       x = "Year", y = "Count") +
+  theme_minimal()
+
+# Filter data to years 2000-2023 to match environmental data availability
+cat("Filtering data to years 2000-2023...\n")
+presenceall2000 <- cleaned_coords_data %>%
+  mutate(year = as.numeric(as.character(year))) %>%
+  filter(!is.na(year), year > 1999)
+
+# Save cleaned and filtered data 
+write.csv(presenceall2000, "outputs/presenceall2000.csv", row.names = FALSE)
+cat("Records after temporal filtering:", nrow(presenceall2000), "\n")
+
+# Create histogram for filtered data
+ggplot(presenceall2000, aes(x = year, fill = scientificName)) +
+  geom_histogram(binwidth = 1, color = "black") +
+  labs(title = "Species Composition by Year (2000-2023)",
+       x = "Year", y = "Count") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+## 7. Species-Specific Data Preparation
+
+This section separates the occurrence data by species to prepare for individual species-level modeling. It also visualizes the temporal distribution of each species’ records using histograms.
+
+```{r species-split}
+# Create a list to store filtered data for each species
+species_data_list <- list()
+
+# Filter data by species using the my species vector. Create a clean dataframe name (remove spaces and special characters). 
+for(species in myspecies) {
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  # Filter data for this species
+  species_data_list[[df_name]] <- presenceall2000 %>% 
+  filter(scientificName == species)
+  
+  # Display summary for this species
+  cat(species, ":", nrow(species_data_list[[df_name]]), "records\n")
+}
+
+# Extract individual dataframes for convenience (maintaining original variable names). Create individual variables dynamically based on myspecies
+for(species in myspecies) {
+  # Create clean dataframe name
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  # Create individual variable in global environment
+  assign(df_name, species_data_list[[df_name]])
+}
+
+# Display summary statistics for each species
+cat("\n=== SPECIES SUMMARY STATISTICS ===\n")
+for(species in myspecies) {
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence20002")
+  
+  data_subset <- species_data_list[[df_name]]
+  cat(species, ":", nrow(data_subset), "records\n")
+}
+
+# Check temporal distribution for each species
+cat("\n=== TEMPORAL DISTRIBUTION BY SPECIES ===\n")
+for(species in myspecies) {
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  data_subset <- species_data_list[[df_name]]
+  if(nrow(data_subset) > 0) {
+    cat(species, "year range:", min(data_subset$year), "-", max(data_subset$year), "\n")
+  } else {
+    cat(species, ": No records found\n")
+  }
+}
+
+# Loop again to display counts of records per year to display year distribution tables
+for(species in myspecies) {
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  data_subset <- species_data_list[[df_name]]
+  cat("\n", species, "records by year:\n")
+  if(nrow(data_subset) > 0) {
+    print(table(data_subset$year))
+  } else {
+    cat("No records found\n")
+  }
+}
+```

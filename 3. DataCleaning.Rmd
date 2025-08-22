@@ -1,0 +1,457 @@
+---
+title: Habitat Suitability Model - Data Cleaning and Variable Selection
+author: Maddie Thomson
+date: 2025-07-17
+output: html_notebook
+---
+
+**Purpose:** This script defines the datasets used throughout the habitat suitability modeling (HSM) analysis. It cleans and organizes environmental data, performs correlation and collinearity tests, and integrates species occurrence records with environmental variables. The output provides the finalized species–environment datasets required for subsequent modeling steps.
+
+**Code to run before:** "2. Environmental.Rmd"\
+**Code to run after:** "4. BART.Rmd"
+
+## 1. Setup and Data Loading
+
+Change species and method in "user settings" before running chunk.
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load required libraries
+library(terra); library(ggplot2); library(pheatmap); library(car); library(fuzzySim); library(dplyr)          
+
+# Set working directory to the script location
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# ------------------ USER SETTINGS ------------------
+# Define all species of interest (consistent with Occurrences script)
+myspecies <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
+# ----------------------------------------------------
+
+# Check if required data exists from previous scripts
+if(!exists("vars") || !inherits(vars, "SpatRaster")) {
+  cat("Loading environmental data from file...\n")
+  vars <- terra::rast("outputs/vars.tif")
+  
+  # Check if the raster loaded successfully
+  if(is.null(vars) || nlyr(vars) == 0) {
+    stop("Error: Could not load environmental data from outputs/vars.tif")
+  }
+}
+
+# Load occurrence data dynamically using myspecies
+if(!exists("presenceall2000")) {
+  cat("Loading occurrence data from file...\n")
+ presenceall2000 <- read.csv("outputs/presenceall2000.csv")
+}
+
+# Create species presence data dynamically
+species_data_list <- list()
+for(species in myspecies) {
+  # Create clean dataframe name
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  # Filter data for this species
+  species_data_list[[df_name]] <- presenceall2000 %>% 
+    filter(scientificName == species)
+  
+  # Create individual variable in global environment
+  assign(df_name, species_data_list[[df_name]])
+  
+  # Display summary for this species
+  cat(species, ":", nrow(species_data_list[[df_name]]), "records\n")
+}
+
+cat("Data loaded successfully:\n")
+cat("Environmental variables:", nlyr(vars), "layers\n")
+cat("Species records loaded:", length(myspecies), "species\n")
+```
+
+------------------------------------------------------------------------
+
+## 2. Environmental Data Inspection
+
+This section offers an optional visualization of all environmental variables, allowing you to inspect their spatial patterns and assess data quality by plotting each layer.
+
+```{r data-inspection, eval=FALSE}
+# Optional: Plot all variables to inspect spread and ensure raster format is correct
+cat("Plotting all environmental variables for inspection...\n")
+
+for (i in 1:nlyr(vars)) {
+  plot(vars[[i]], main = names(vars)[i])
+  Sys.sleep(1)  # wait a second before next plot
+}
+
+cat("Environmental variable inspection completed\n")
+```
+
+------------------------------------------------------------------------
+
+## 3. Data Preparation for Correlation Analysis
+
+This section converts raster data to matrix format and prepares samples for correlation testing.
+
+```{r data-preparation}
+cat("Converting raster data to matrix format...\n")
+
+# Convert raster to data frame (includes lon/lat automatically)
+vals <- as.data.frame(vars)
+
+# Remove rows with any NAs (pixels missing data)
+vals_clean <- vals[complete.cases(vals), ]
+cat("Clean data points:", nrow(vals_clean), "out of", nrow(vals), "total\n")
+
+# Take sub-sample to reduce computing capacity for tests
+set.seed(123)
+sample_size <- min(10000, nrow(vals_clean))
+sample_idx <- sample(nrow(vals_clean), sample_size)
+sampled_vals <- vals_clean[sample_idx, ]
+
+cat("Sample size for correlation analysis:", nrow(sampled_vals), "points\n")
+cat("Number of variables:", ncol(sampled_vals), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 4. Spearman Correlation Analysis
+
+This section performs Spearman correlation analysis to identify highly correlated predictor variables and generates visualizations of these relationships. Models using the variables selected through Spearman correlation will later be compared to models based on VIF-selected variables. A heatmap is created to clearly display the correlation patterns among all variables.
+
+```{r spearman-analysis}
+cat("Conducting Spearman correlation analysis...\n")
+
+# Calculate Spearman correlation matrix
+cor_mat <- cor(sampled_vals, method = "spearman", use = "pairwise.complete.obs")
+
+# Convert correlation to distance for clustering
+dist_mat <- as.dist(1 - cor_mat)
+
+# Hierarchical clustering
+hc <- hclust(dist_mat, method = "average")
+
+# Plot dendrogram
+plot(hc, main = "Hierarchical Clustering of Variables (Spearman)")
+
+# Plot heatmap and save correlation. Assess the heatmap for correlation keying in on darker colours (red for positive, blue for negative)
+cat("Creating correlation heatmap...\n")
+pheatmap(cor_mat,
+         clustering_method = "average",
+         main = "Spearman Correlation Heatmap",
+         cluster_rows = hc, cluster_cols = hc,
+         display_numbers = TRUE, number_format = "%.2f",
+         filename = "outputs/spearman_heatmap.png")
+
+cat("Spearman correlation heatmap saved as: outputs/spearman_heatmap.png\n")
+```
+
+------------------------------------------------------------------------
+
+## 5. High Correlation Variable Identification
+
+This section identifies predictor variables that are highly correlated, using a threshold of ±0.7. This threshold was chosen based on commonly cited values in the literature for excluding strongly correlated predictors. Positive correlations (\> +0.7): Variables that increase together, indicating potential redundancy. Negative correlations (\< −0.7): Variables that move in opposite directions, which may also signal redundancy or inverse relationships.
+
+```{r high-correlation-identification}
+# Convert correlation matrix to long-form dataframe
+cor_table <- as.table(cor_mat)
+cor_df <- as.data.frame(cor_table)
+names(cor_df) <- c("Variable_1", "Variable_2", "Spearman")
+
+# Remove self-correlations and mirrored duplicates
+cor_df <- cor_df[cor_df$Variable_1 != cor_df$Variable_2, ]
+cor_df <- cor_df[as.character(cor_df$Variable_1) < as.character(cor_df$Variable_2), ]
+
+# Filter by threshold (±0.7)
+highcor <- subset(cor_df, Spearman > 0.7 | Spearman < -0.7)
+
+cat("Highly correlated variable pairs (|r| > 0.7):", nrow(highcor), "\n")
+if(nrow(highcor) > 0) {
+  cat("Top correlations:\n")
+  print(head(highcor[order(abs(highcor$Spearman), decreasing = TRUE), ], 10))
+}
+```
+
+------------------------------------------------------------------------
+
+## 6. Variable Selection and Removal
+
+This section applies a systematic procedure to remove highly correlated variables, guided by both correlation analysis and ecological reasoning. The exact variable selection may vary depending on the species and relevant literature, so users should adjust this step according to their specific study system.
+
+```{r variable-selection}
+# Function to remove variables from correlation matrix
+remove_vars <- function(cormat, vars_to_remove) {
+  cormat[!(rownames(cormat) %in% vars_to_remove), !(colnames(cormat) %in% vars_to_remove)]
+}
+
+# Function to plot heatmap. Visually inspect heatmap for highly correlated variables. 
+plot_heatmap <- function(cormat, title = "Heatmap") {
+  dist_mat <- as.dist(1 - cormat)
+  hc <- hclust(dist_mat, method = "average")
+  pheatmap(cormat,
+           clustering_method = "average",
+           main = title,
+           cluster_rows = hc, cluster_cols = hc,
+           display_numbers = TRUE, number_format = "%.2f")
+}
+
+# Function to find remaining high correlations
+get_highcor_pairs <- function(cormat, threshold = 0.7) {
+  df <- as.data.frame(as.table(cormat))
+  names(df) <- c("Variable_1", "Variable_2", "Spearman")
+  df <- df[df$Variable_1 != df$Variable_2, ]
+  df <- df[as.character(df$Variable_1) < as.character(df$Variable_2), ]
+  subset(df, Spearman > threshold | Spearman < -threshold)
+}
+
+cat("Performing first variable cut...\n")
+
+# First manual variable cut based on ecological reasoning. Cut variables that are highly correlated to the variables most noted in literature. Change this section for each species, depending on the literature. 
+var_first_cut <- c("chl_min_surf", "chl_max_surf", "o2_min_surf", "o2_max_surf", 
+                   "bathymetry_max", "slope", "thetao_min_mean_benth", 
+                   "thetao_max_benth", "so_min_benth", "so_max_benth", "so_min_surf", 
+                   "so_max_surf", "so_mean_surf", "o2_mean_benth", "o2_min_benth", "o2_max_benth", 
+                   "sws_max_surf", "sws_min_surf", "sithick_max_surf")
+
+# Remove first batch
+cor_mat_reduced1 <- remove_vars(cor_mat, var_first_cut)
+
+cat("Variables removed in first cut:", length(var_first_cut), "\n")
+cat("Remaining variables:", ncol(cor_mat_reduced1), "\n")
+
+# Plot heatmap after first cut
+plot_heatmap(cor_mat_reduced1, "Spearman Correlation Heatmap (After First Cut)")
+
+# Second variable cut
+cat("Performing second variable cut...\n")
+
+# Find remaining high correlations
+highcor_reduced1 <- get_highcor_pairs(cor_mat_reduced1)
+
+# Second variable cut - remove temperature variables (highly correlated with ice thickness)
+var_second_cut <- c("thetao_mean_surf", "thetao_min_surf", "thetao_max_surf", 
+                    "thetao_mean_benth", "thetao_min_benth", "thetao_max_benth")
+
+cor_mat_reduced2 <- remove_vars(cor_mat_reduced1, var_second_cut)
+
+cat("Variables removed in second cut:", length(var_second_cut), "\n")
+cat("Remaining variables:", ncol(cor_mat_reduced2), "\n")
+
+# Plot heatmap after second cut, visually inspect. 
+plot_heatmap(cor_mat_reduced2, "Spearman Correlation Heatmap (After Second Cut)")
+
+# Check remaining high correlations
+highcor_reduced2 <- get_highcor_pairs(cor_mat_reduced2)
+
+if(nrow(highcor_reduced2) > 0) {
+  cat("Remaining high correlations after cuts:", nrow(highcor_reduced2), "\n")
+} else {
+  cat("No remaining high correlations after cuts\n")
+}
+
+# Combine all variables to remove. This data set will be used in all future R scripts. 
+vars_to_remove <- c(var_first_cut, var_second_cut)
+vals_final <- vals_clean[, !(colnames(vals_clean) %in% vars_to_remove)]
+vars_to_keep <- names(vals_final)
+
+cat("Final variable selection (Spearman method):", length(vars_to_keep), "variables\n")
+```
+
+------------------------------------------------------------------------
+
+## 7. VIF Correlation Analysis
+
+This section conducts Variance Inflation Factor (VIF) analysis as an alternative method for variable selection. Models created with the variables defined through the Spearman correlation analysis will be compared to the models with the VIF variables.
+
+```{r vif-analysis}
+cat("Conducting VIF correlation analysis...\n")
+
+# Generate model to determine collinearity using the sub-sampled data set
+sampled_vals_df <- data.frame(sampled_vals)
+vif_model <- lm(rep(1, nrow(sampled_vals_df)) ~ ., data = sampled_vals_df)
+
+# Function to iteratively remove variables with high VIF values. A threshold of 10 is applied, since VIF > 10 indicates strong multicollinearity, suggesting the variable is redundant and may distort the model.
+vif_stepwise_filter <- function(data, threshold = 10, verbose = TRUE) {
+  data <- as.data.frame(data)
+  dropped <- c()
+  
+  repeat {
+    model <- lm(rep(1, nrow(data)) ~ ., data = data)
+    vif_vals <- vif(model)
+    max_vif <- max(vif_vals)
+    
+    if (max_vif < threshold) {
+      if (verbose) cat("All VIFs below threshold. Done.\n")
+      break
+    }
+    
+    var_to_remove <- names(which.max(vif_vals))
+    dropped <- c(dropped, var_to_remove)
+    
+    if (verbose) cat("Removing:", var_to_remove, "(VIF =", round(max_vif, 2), ")\n")
+    
+    data <- data[, !names(data) %in% var_to_remove]
+  }
+  
+  return(list(filtered_data = data, removed_variables = dropped))
+}
+
+# Apply VIF filtering
+vif_result <- vif_stepwise_filter(sampled_vals_df, threshold = 10)
+
+cat("VIF analysis completed\n")
+cat("Variables removed by VIF:", length(vif_result$removed_variables), "\n")
+cat("Variables remaining after VIF:", ncol(vif_result$filtered_data), "\n")
+
+# Get the variable names selected by the VIF process
+vif_vars <- names(vif_result$filtered_data)
+```
+
+------------------------------------------------------------------------
+
+## 8. Dataset Creation and Export
+
+This section creates the final environmental datasets and integrates them with occurrence data for each species.
+
+```{r dataset-creation}
+cat("Creating final environmental datasets...\n")
+
+# Subset the full raster (with NAs for the land) with variables selected by each method
+# Remove the land (i.e., NAs in the data)
+na_count <- app(vars, fun = function(...) sum(is.na(c(...))))
+land_mask <- na_count == nlyr(vars)
+vars_clean_rast <- mask(vars, land_mask)
+vars_cut <- vars_clean_rast[[vars_to_keep]]  # Spearman correlation method
+vars_vif <- vars_clean_rast[[vif_vars]]      # VIF correlation method
+
+vars_cutland <- vars[[vars_to_keep]] # For Spearman correlation method with land 
+vars_vifland <- vars[[vif_vars]] # For VIF correlation method with land 
+
+# Save environmental datasets
+writeRaster(vars_cut, "outputs/vars_cut.tif", overwrite = TRUE)
+writeRaster(vars_vif, "outputs/vars_vif.tif", overwrite = TRUE)
+
+cat("Environmental datasets saved:\n")
+cat("- Spearman method:", nlyr(vars_cut), "variables\n")
+cat("- VIF method:", nlyr(vars_vif), "variables\n")
+
+# Extract coordinates for each species dynamically
+species_coords_list <- list()
+for(species in myspecies) {
+  # Create clean dataframe name
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  # Get the presence data for this species
+  species_data <- species_data_list[[df_name]]
+  
+  # Extract coordinates
+  coords_name <- gsub("presence2000", "prescoord", df_name)
+  species_coords_list[[coords_name]] <- species_data[, c("decimalLongitude", "decimalLatitude")]
+  names(species_coords_list[[coords_name]]) <- c("x", "y")
+  
+  # Create individual variable in global environment
+  assign(coords_name, species_coords_list[[coords_name]])
+  
+  cat("Coordinates extracted for", species, "\n")
+}
+
+cat("Coordinates extracted for all species\n")
+```
+
+------------------------------------------------------------------------
+
+## 9. Species-Environment Data Integration
+
+This section integrates occurrence data with environmental variables to create the final modeling datasets. This section can take up more than an hour to process, therefore try to only do it once. ⚠️ WARNING: The datasets made in this code section are HUGE, particularly the VIF and all variables (if you are running the all variables datset) and may abort R during this process. This process may take hours to run.
+
+```{r data-integration}
+# Create outputs folder if it doesn't exist
+if (!dir.exists("outputs")) dir.create("outputs")
+
+cat("Integrating species occurrence data with environmental variables...\n")
+
+# 1. Spearman Correletion variable set
+cat("Creating datasets using Spearman correlation method...\n")
+
+# Create datasets for each species dynamically
+for(species in myspecies) {
+  # Create clean names
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  coords_name <- gsub("presence2000", "prescoord", df_name)
+  varscut_name <- gsub("presence2000", "varscut_2000", df_name)
+  
+  # Get coordinates for this species
+  species_coords <- species_coords_list[[coords_name]]
+  
+  # Create gridRecords dataset
+  assign(varscut_name, fuzzySim::gridRecords(rst = vars_cut, pres.coords = species_coords))
+  
+  # Save to CSV
+  csv_filename <- paste0("outputs/", varscut_name, "_spearman.csv")
+  write.csv(get(varscut_name), csv_filename, row.names = FALSE)
+  
+  cat("Created", csv_filename, "for", species, "\n")
+}
+
+# 2. VIF correlation variable set
+cat("Creating datasets using VIF correlation method...\n")
+
+for(species in myspecies) {
+  # Create clean names
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  coords_name <- gsub("presence2000", "prescoord", df_name)
+  varsvif_name <- gsub("presence2000", "varsVIF_2000", df_name)
+  
+  # Get coordinates for this species
+  species_coords <- species_coords_list[[coords_name]]
+  
+  # Create gridRecords dataset directly
+  grid_data <- fuzzySim::gridRecords(rst = vars_vif, pres.coords = species_coords)
+  
+  # Save to CSV using fwrite (much faster)
+  csv_filename <- paste0("outputs/", varsvif_name, "_vif.csv")
+  data.table::fwrite(grid_data, csv_filename)
+  
+  cat("Created", csv_filename, "for", species, "\n")
+}
+
+# 3. Optional: All variable dataset 
+cat("Creating datasets with all variables...\n")
+
+for(species in myspecies) {
+  # Create clean names
+  df_name <- gsub(" ", "", species) %>% 
+             gsub("\\(", "", .) %>% 
+             gsub("\\)", "", .) %>%
+             paste0("presence2000")
+  
+  coords_name <- gsub("presence2000", "prescoord", df_name)
+  varsall_name <- gsub("presence2000", "varsall_2000", df_name)
+  
+  # Get coordinates for this species
+  species_coords <- species_coords_list[[coords_name]]
+  
+  # Create gridRecords dataset
+  assign(varsall_name, fuzzySim::gridRecords(rst = vars, pres.coords = species_coords))
+  
+  # Save to CSV
+  csv_filename <- paste0("outputs/", varsall_name, "_allvars.csv")
+  write.csv(get(varsall_name), csv_filename, row.names = FALSE)
+  
+  cat("Created", csv_filename, "for", species, "\n")
+}
+
+cat("All datasets created and saved successfully!\n")
+```
+
+------------------------------------------------------------------------

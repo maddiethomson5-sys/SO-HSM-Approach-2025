@@ -1,0 +1,17 @@
+# Ignore everything by default
+*
+
+# Keep R Markdown notebooks and their HTML output
+!*.Rmd
+!*.html
+
+# Keep the .gitignore itself
+!.gitignore
+
+# Ignore R/RStudio temporary and cache files
+.Rhistory
+.RData
+.Rproj.user/
+.Ruserdata/
+.Rapp.history
+*.Rplots.pdf
