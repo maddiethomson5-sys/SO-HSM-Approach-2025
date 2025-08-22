@@ -5,6 +5,10 @@
 !*.Rmd
 !*.html
 
+# Keep Shiny app folder
+!App/
+!App/**
+
 # Keep the .gitignore itself
 !.gitignore
 
