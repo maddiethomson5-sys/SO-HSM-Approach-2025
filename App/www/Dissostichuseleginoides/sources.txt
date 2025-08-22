@@ -1,0 +1,4 @@
+Barbosa, A. M. (2025). Species distribution modelling with Bayesian statistics in R [Course materials].;
+Guillaumot, C. (n.d.). SDMPLAY_R_PACKAGE [Source code]. In THESIS repository. Retrieved August 18, 2025, from https://github.com/charleneguillaumot/THESIS/tree/master/SDMPLAY_R_PACKAGE;
+Kass, J. M. (2023). ENMeval 2.0 vignette. Retrieved from https://jamiemkass.github.io/ENMeval/articles/ENMeval-2.0-vignette.html;
+Maschette, D., Sumner, M., & Raymond, B. (2019). SOmap: Southern Ocean maps (Version 0.6.2.9005) [R package]. Retrieved from https://github.com/AustralianAntarcticDivision/SOmap

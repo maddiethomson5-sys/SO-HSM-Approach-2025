@@ -1,0 +1,7 @@
+"Name","Description","Value","Depth","Variant"
+"chl_mean_surf","Chlorophyll",0.147897774909433,"Surface","mean"
+"o2_mean_surf","Dissolved Molecular Oxygen",0.195775363383069,"Surface","mean"
+"sithick_mean_surf","Sea Ice Thickness",0.1564060253456,"Surface","mean"
+"sws_mean_benth","Sea Water Speed",0.145786387021362,"Benthic","mean"
+"bathymetry_mean","Bathymetry",0.200950152991667,"","mean"
+"terrain_ruggedness_index","Terrain Ruggedness Index",0.15318429634887,"",""

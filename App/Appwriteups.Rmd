@@ -1,0 +1,147 @@
+---
+title: "Species Information"
+output: html_notebook
+---
+
+This notebook is used to draft the information for each species for the shiny app. 
+
+```{r}
+library(sf)
+library(ggplot2)
+library(rnaturalearth)
+library(rmapshaper)
+
+# Ensure that the working directory is define wherever the app is saved. 
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# Species list + cleaned names
+myspecies_list <- c(
+  "Dissostichus mawsoni", 
+  "Dissostichus eleginoides", 
+  "Champsocephalus gunnari"
+)
+clean_names <- gsub("[ ()]", "", myspecies_list)
+
+# Species-specific information (same order as myspecies_list)
+
+model_info <- ("Habitat Suitability Models (HSMs) were developed to link presence observations of three Southern Ocean fish species with key environmental variables defining suitable habitat. A Bayesian Additive Regression Trees (BART) model was used, with the most informative predictors identified via Spearman correlation analysis. Environmental data were sourced from Bio-ORACLE, and species occurrence records from OBIS and GBIF. To address spatial aggregation in presence-only records, kernel density estimation (KDE) was applied. Spatial autocorrelation was assessed using Moran’s I, and 2-fold checkerboard spatial block cross-validation was used to split the data into training and test sets. Model performance was evaluated using Area Under the Curve (AUC), cutoff probability, True Skill Statistic (TSS), and Type I and Type II errors.")
+
+species_info <- list(
+  "Closely related to the Patagonian toothfish (*Dissostichus eleginoides*), the Antarctic toothfish (*D. mawsoni*) is a benthopelagic nototheniid endemic to the Southern Ocean (SO), occurring at higher latitudes south of the Antarctic Convergence (Carimán et al., 2024). The two species overlap near this convergence, particularly north of the Ross Sea (Hanchet et al., 2015), and while similar in appearance and behaviour, they are genetically distinct. This species is adapted to extreme cold and stable SO temperatures (−1.8 to 3.0 °C). The Antarctic toothfish is commercially important and targeted with bottom longlines, with fisheries south of the Antarctic Convergence managed by the Commission for the Conservation of Antarctic Marine Living Resources (CCAMLR) under an ecosystem-based and precautionary approach (Seong et al., 2023). The species has not been assessed by the IUCN. <p> Antarctic toothfish have a circumpolar distribution along the Antarctic continental shelf and slope, exhibiting high site fidelity and limited large-scale dispersal, which reduces overlap with *D. eleginoides*. Juveniles undertake ontogenetic migrations, beginning in shallow pelagic coastal waters before shifting into deeper habitats with age (Carimán et al., 2024). Older juveniles adopt a demersal lifestyle on the continental shelf (50–300 m), subadults move to the continental slope (500–850 m), and adults settle in deep slope regions, northern banks, ridges, and seamounts by 12–16 years. ",
+  
+  "The Patagonian toothfish (*Dissostichus eleginoides*) is a long-lived nototheniid endemic to the Southern Ocean, characterized by sharp teeth, slow growth, and late maturity (Collins et al., 2010). Compared to the Antarctic toothfish (*D. mawsoni*), a closely related species, the Patagonian toothfish occurs further north around sub-Antarctic islands and southern South America, with some distributional overlap. Three subpopulations have been identified: Indian Ocean, South Georgia, and Patagonian Shelf (Collins et al., 2010). Adults are commercially important and targeted by longline fisheries, while juveniles are primarily caught as trawl bycatch (Collins et al., 2010). Fisheries south of the Antarctic Convergence are managed by the Commission for the Conservation of Antarctic Marine Living Resources (CCAMLR) with size limits and gear restrictions, whereas populations outside this zone are managed by national authorities (Hanchet et al., 2015). The species has not yet been assessed by the IUCN.<p> Adults show strong site fidelity, inhabiting deep waters from 500 to 3,000 m over silt, mud, seamounts, and rocky outcroppings, often near complex features such as shelf breaks and slopes (Collins et al., 2010; Brown et al., 2013). Juveniles occupy shallower demersal habitats (<300 m) on mixed sand and gravel from age one, dispersing with currents before gradually moving offshore at 6–7 years (CCAMLR Secretariat, 2023). Ontogenetic movements into deeper waters are influenced by predation risk, food availability, and reproduction. Preferred water temperatures range from 2–11 °C, with metabolism adapted to cold, high-pressure environments (Encina-Montoya et al., 2024).",
+  
+  "*Champsocephalus gunnari*, or mackerel icefish, is a member of the notothenioid family Channichthyidae, notable for having little or no hemoglobin in its blood (CCAMLR Secretariat, 2022). Oxygen transport occurs via plasma solubility, a unique vertebrate adaptation (Feller & Gerday, 1997, Kock & Everson, 2003). To compensate, mackerel icefish have enlarged hearts and increased blood volume, enabling faster plasma circulation. They are benthopelagic predators feeding mainly on krill, euphausiids, and mysids (Kock & Everson, 2003). Unlike longer-lived toothfish, mackerel icefish typically live 6–7 years and reach an average adult length of 35 cm. This species is commercially important in the Southern Ocean, with fisheries mainly targeting Subarea 48.3 and Division 58.5.2 using mid- and bottom trawls, though catch limits in Area 48 have not been fully reached in recent years (CCAMLR Secretariat, 2022). <p> Mackerel icefish are endemic to the Southern Ocean, confined to island shelves of the sub-Antarctic and Antarctic Peninsula (CCAMLR Secretariat, 2022). They are shelf-associated and rarely venture offshore or into deep waters. In Subarea 48.3, populations are generally restricted to shallow waters (<350 m) near South Georgia and Shag Rocks, forming large aggregations. In Subarea 58.5.2, fish are most abundant at depths under 350 m around Heard Island, with additional aggregations observed at Shell Bank (CCAMLR Secretariat, 2022). Distribution is influenced by temperature, favoring −1.0 to 3.0 °C, and by food availability. Spawning occurs nearshore in shallow waters (<200 m), where eggs are deposited on the seafloor (CCAMLR Secretariat, 2022). Larvae are strictly pelagic and can be caught in coastal areas during late winter. Similar to toothfish, juveniles gradually shift from pelagic to demersal lifestyles, but adults remain at shallower depths (30–350 m). Icefish require well-oxygenated waters due to their lack of hemoglobin and are adapted to stable, cold temperatures (Feller & Gerday, 1997)")
+
+lifehistory_info <- list(
+  "Dissostichus mawson" = "Age, growth, and longevity: median age at maturity 13–16 years, median length at maturity ~100 cm (Carimán et al., 2024); Diet: predominantly piscivorous, diet varies geographically and shifts with life stage, with juveniles consuming smaller prey and adults targeting larger fish (Hanchet et al., 2015); Physiology and adaptations: antifreeze proteins enable survival at sub-zero temperatures, weakly mineralized skeleton and high muscle fat content provide neutral buoyancy (Collins et al., 2010, Seong et al., 2023).", 
+  "Dissostichus eleginoides" = "Age, growth, and longevity: long-lived species, slow growth, late maturity, can reach up to 2.8 m and 50 years (Collins et al., 2010); Diet: active predators feeding on fish, cephalopods, and crustaceans, juveniles consume smaller prey while adults feed on larger individuals (CCAMLR Secretariat, 2023; Collins et al., 2010); Physiology and adaptations: antifreeze proteins enable survival at sub-zero temperatures, weakly mineralized skeleton and high muscle fat content provide neutral buoyancy (Collins et al., 2010, Seong et al., 2023).", 
+  "Champsocephalus gunnari" = "Age, growth, and longevity: short-lived species (6–7 years), reaching ~35 cm in length (CCAMLR Secretariat, 2022); Diet: feed primarily on krill, euphausiids, and mysids (Kock & Everson, 2003); Physiology and adaptations: lack hemoglobin, have enlarged hearts and increased blood volume for faster plasma circulation, sensitive to oxygen availability and adapted to stable, cold waters (Kock & Everson, 2003)."
+)
+
+snapshot_info <- list(
+  "Dissostichus mawsoni" = "Phylum: Chordata, Class: Actinopterygii, Order: Perciformes, Family: Nototheniidae, Common name: Antarctic toothfish, Fun Fact: This species is named after Australian geologist Douglas Mawson.",
+"Dissostichus eleginoides" = "Phylum: Chordata, Class: Actinopterygii, Order: Perciformes, Family: Nototheniidae, Common name: Patagonian toothfish, Fun Fact: Individuals may reach 2.8 m and live up to 50 years.",
+"Champsocephalus gunnari" = "Phylum: Chordata, Class: Actinopterygii, Order: Perciformes, Family: Channichthyidae, Common name: Mackerel icefish, Fun Fact: These fish are adapted to have a lack of hemoglobin, resulting in colourless blood."
+)
+
+
+references_info <- list(
+  "Carimán, P., Niklitschek, E. J., Garcés, C., Leisen, M., Barra, F., & Romero, R. (2024). Antarctic Toothfish Dissostichus mawsoni in the South Orkney Islands: Using Otolith Chemistry to Test Current Hypotheses About Nursery Areas and Demographic Units. Biology, 14(1), 7. https://doi.org/10.3390/biology14010007; Collins, M. A., Brickle, P., Brown, J., & Belchier, M. (2010). The Patagonian Toothfish. Advances in Marine Biology, 227–300. https://doi.org/10.1016/b978-0-12-381015-1.00004-6; Hanchet, S., Dunn, A., Parker, S., Horn, P., Stevens, D., & Mormede, S. (2015). The Antarctic toothfish (Dissostichus mawsoni): Biology, ecology, and life history in the Ross Sea region. Hydrobiologia, 761(1), 397–414. https://doi.org/10.1007/s10750-015-2435-6; Kock, K. ‐H., & Everson, I. (2003). Shedding new light on the life cycle of mackerel icefish in the Southern Ocean. Journal of Fish Biology, 63(1), 1–21. https://doi.org/10.1046/j.1095-8649.2003.00150.x; Seong, G. C., Chung, S., Kim, D.-G., Kang, D. Y., Jin, S., & Baeck, G. W. (2023). Feeding ecology of Antarctic toothfish, Dissostichus mawsoni in the subarea 88.3 (Bellingshausen Sea and eastern Amundsen Sea) of the Southern Ocean. Frontiers in Marine Science, 10. https://doi.org/10.3389/fmars.2023.1240569; CCAMLR Secretariat. (2023, April 17). Species Description 2022: Dissostichus mawsoni https://www.ccamlr.org",
+  "Collins, M. A., Brickle, P., Brown, J., & Belchier, M. (2010). The Patagonian Toothfish. Advances in Marine Biology, 227–300. https://doi.org/10.1016/b978-0-12-381015-1.00004-6; Hanchet, S., Dunn, A., Parker, S., Horn, P., Stevens, D., & Mormede, S. (2015). The Antarctic toothfish (Dissostichus mawsoni): Biology, ecology, and life history in the Ross Sea region. Hydrobiologia, 761(1), 397–414. https://doi.org/10.1007/s10750-015-2435-6; Brown, J., Brickle, P., & Scott, B. E. (2013). Investigating the movements and behaviour of Patagonian toothfish (Dissostichus eleginoides Smitt, 1898) around the Falkland Islands using satellite linked archival tags. Journal of Experimental Marine Biology and Ecology, 443, 65–74. https://doi.org/10.1016/j.jembe.2013.02.029; CCAMLR Secretariat. (2023, April 17). Species Description 2022: Dissostichus eleginoides. https://www.ccamlr.org; Encina-Montoya, F., Vega-Aguayo, R., Oberti-Grassau, C., Mardones-Lazcano, A., Muñoz, G., Barrios-Figueroa, R., Alvarado-Flores, C., Reyes-Campos, A., & Urbina-Foneron, M. A. (2024). First report of Patagonian toothfish (Dissostichus eleginoides) metabolic rate and its scaling on a surface culture system. Brazilian Journal of Biology, 84. https://doi.org/10.1590/1519-6984.285669; Seong, G. C., Chung, S., Kim, D.-G., Kang, D. Y., Jin, S., & Baeck, G. W. (2023). Feeding ecology of Antarctic toothfish, Dissostichus mawsoni in the subarea 88.3 (Bellingshausen Sea and eastern Amundsen Sea) of the Southern Ocean. Frontiers in Marine Science, 10. https://doi.org/10.3389/fmars.2023.1240569; CCAMLR Secretariat. (2023, April 17). Species Description 2022: Dissostichus mawsoni https://www.ccamlr.org",
+    "CCAMLR Secretariat. (2022). Species Description 2022: Champsocephalus gunnari. CCAMLR. https://fishdocs.ccamlr.org/SpDescr_ANI_2022.html; Feller, G., & Gerday, C. (1997). Adaptations of the hemoglobinless Antarctic icefish (Channichthyidae) to hypoxia tolerance. Comparative Biochemistry and Physiology Part A: Physiology, 118(4), 981–987. https://doi.org/10.1016/S0300-9629(97)86786-2; Kock, K. ‐H., & Everson, I. (2003). Shedding new light on the life cycle of mackerel icefish in the Southern Ocean. Journal of Fish Biology, 63(1), 1–21. https://doi.org/10.1046/j.1095-8649.2003.00150.x")
+
+about_app <- ("This application was developed to leverage available presence data for commercially and ecologically important Southern Ocean fish species to estimate and visualise habitat suitability. The Shiny app focuses on three target species—*Dissostichus eleginoides*, *Dissostichus mawsoni*, and *Champsocephalus gunnari*—providing species-specific response curves to environmental predictors and modelling potential distributions. Environmental data were obtained from Bio-ORACLE, and species occurrence records were compiled from OBIS and GBIF.
+It should be noted that model outputs do not reflect observed distributions but rather indicate areas of potential environmental suitability. Presence data for Southern Ocean fish are spatially biased toward surveyed or fished regions therefore, model predictions should be interpreted with caution. The app has potential for extension to project habitat suitability under climate change scenarios and to compare current and future projections. The R code has been developed modularly over six scripts, enabling adaptation for other Southern Ocean species, provided sufficient presence data are available.
+Special thanks to the ULB Marine Biology Lab (Pablo, Charlie, Anton, and Ming)!")
+
+sources <- ("Barbosa, A. M. (2025). Species distribution modelling with Bayesian statistics in R [Course materials].;
+Guillaumot, C. (n.d.). SDMPLAY_R_PACKAGE [Source code]. In THESIS repository. Retrieved August 18, 2025, from https://github.com/charleneguillaumot/THESIS/tree/master/SDMPLAY_R_PACKAGE;
+Kass, J. M. (2023). ENMeval 2.0 vignette. Retrieved from https://jamiemkass.github.io/ENMeval/articles/ENMeval-2.0-vignette.html;
+Maschette, D., Sumner, M., & Raymond, B. (2019). SOmap: Southern Ocean maps (Version 0.6.2.9005) [R package]. Retrieved from https://github.com/AustralianAntarcticDivision/SOmap")
+
+references2 <- ("Barbet-Massin, M., Jiguet, F., Albert, C. H., & Thuiller, W. (2012). Selecting pseudo-absences for species distribution models: How, where and how many? Methods in Ecology and Evolution, 3(2), 327–338. https://doi.org/10.1111/j.2041-210X.2011.00172.x;
+Guisan, A., & Zimmermann, N. E. (2000). Predictive habitat distribution models in ecology. Ecological Modelling, 135(2–3), 147–186. https://doi.org/10.1016/S0304-3800(00)00354-9;
+Guisan, A., Thuiller, W., & Zimmermann, N. E. (2017). Habitat suitability and distribution models: With applications in R. Cambridge University Press. https://doi.org/10.1017/9781139028271.005;
+Guillaumot, C., Artois, J., Saucède, T., Demoustier, L., Moreau, C., Eléaume, M., Agüera, A., & Danis, B. (2019). Broad-scale species distribution models applied to data-poor areas. Progress in Oceanography, 175, 198–207. https://doi.org/10.1016/j.pocean.2019.04.007;
+Guillaumot, C., Danis, B., & Saucède, T. (2021). Species distribution modelling of the Southern Ocean benthos: A review on methods, cautions and solutions. Antarctic Science, 33(4), 349–372. https://doi.org/10.1017/S0954102021000183;
+Guillaumot, C., Moreau, C., Danis, B., & Saucède, T. (2020). Extrapolation in species distribution modelling: Application to Southern Ocean marine species. Progress in Oceanography, 188, 102438. https://doi.org/10.1016/j.pocean.2020.102438;
+Merow, C., Smith, M. J., & Silander, J. A., Jr. (2013). A practical guide to MaxEnt for modeling species’ distributions: What it does, and why inputs and settings matter. Ecography, 36(10), 001–012. https://doi.org/10.1111/j.1600-0587.2013.07872.x;
+Woods, B. L., Van de Putte, A. P., Hindell, M. A., Raymond, B., Saunders, R. A., Walters, A., & Trebilco, R. (2023). Species distribution models describe spatial variability in mesopelagic fish abundance in the Southern Ocean. Frontiers in Marine Science, 9, 981434. https://doi.org/10.3389/fmars.2022.981434")
+
+# Create species folders, overview subfolder, and write unique info
+for (i in seq_along(clean_names)) {
+  
+  # put 'www' first, then species folder
+  species_dir <- file.path(getwd(), "www", clean_names[i])
+  
+  dir.create(species_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # Write overview.txt
+  overview_file <- file.path(species_dir, "overview.txt")
+  writeLines(species_info[[i]], con = overview_file)
+  
+  # Write snapshot.txt
+  snapshot_file <- file.path(species_dir, "snapshot.txt")
+  writeLines(snapshot_info[[i]], con = snapshot_file)
+  
+  # Write Life History.txt 
+  lifehistory_file <- file.path(species_dir, "lifehistory.txt")
+  writeLines(lifehistory_info[[i]], con = lifehistory_file)
+  
+  # Write References.txt 
+  references_file <- file.path(species_dir, "references.txt")
+  writeLines(references_info[[i]], con = references_file)
+  
+  # Write Modelling Approach.txt
+  modelapproach_file <- file.path(species_dir, "m_approach.txt")
+  writeLines(model_info, con = modelapproach_file)
+  
+  # Write About App.txt
+  aboutapp_file <- file.path(species_dir, "about_app.txt")
+  writeLines(about_app, con = aboutapp_file)
+  
+   # Write Resources.txt
+  sources_file <- file.path(species_dir, "sources.txt")
+  writeLines(sources, con = sources_file)
+  
+   # Write References.txt for about App
+  references2_file <- file.path(species_dir, "references2.txt")
+  writeLines(references2, con = references2_file)
+}
+
+
+# Define coastline 
+countries_sf <- ne_countries(scale = "medium", returnclass = "sf")
+antarctica_sf <- countries_sf[countries_sf$name == "Antarctica", ]
+antarctica_simple <- ms_simplify(antarctica_sf, keep = 0.05)
+
+# Plot Antarctic map 
+q <- ggplot() +
+  with_shadow(
+    geom_sf(data = antarctica_simple, fill = "slategray2", color = "white", size = 1.5),
+    sigma = 2, x_offset = 0, y_offset = 0
+  ) +
+  coord_sf(datum = NA, expand = FALSE) +
+  theme_void() +
+  theme(panel.background = element_rect(fill = "transparent", color = NA))
+
+# Save stretched PNG
+ggsave(
+  filename = "AntarcticaCoastline3.png",
+  path = paste0("/www"),
+  plot = q,
+  bg = "transparent",
+  width = 9.2,   # wider
+  height = 3,   # short banner
+  dpi = 300
+)
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+

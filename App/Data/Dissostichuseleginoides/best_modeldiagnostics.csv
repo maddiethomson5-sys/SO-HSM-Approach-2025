@@ -1,0 +1,6 @@
+"Metric","Value"
+"AUC",0.9823108
+"Cutoff",0.02413307
+"TSS",0.9033972
+"Type_I_error",0.03333333
+"Type_II_error",0.06326942

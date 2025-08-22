@@ -1,0 +1,13 @@
+Call:  dbarts::bart dat_sel[, varsel_emb] dat_sel[, "presence"] TRUE 654 
+ 
+Predictor list: 
+ chl_mean_surf o2_mean_surf sithick_mean_surf sws_mean_surf so_mean_benth bathymetry_mean terrain_ruggedness_index 
+ 
+Area under the receiver-operator curve 
+AUC = 0.9583263 
+ 
+Recommended threshold (maximizes true skill statistic) 
+Cutoff =  0.03416795 
+TSS =  0.8377275 
+Resulting type I error rate:  0.05732484 
+Resulting type II error rate:  0.1049477 
