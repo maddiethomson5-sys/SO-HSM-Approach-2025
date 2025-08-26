@@ -51,18 +51,32 @@ ui <- page_fillable(
   ),
   tags$head(
     tags$style(HTML("
+
+#page-container {
+  display: flex;
+  align-items: flex-start;   /* align top */
+  width: 100%;               /* full width */
+  margin: 0;                 /* reset bootstrap margins */
+  padding: 0;                /* reset bootstrap padding */
+}
+
 /* Sidebar styling */
-#sidebar {
+#sidebar-container {
   width: 280px;
+  flex-shrink: 0;     /* don't let it shrink */
+  height: 100vh;      /* full viewport height */
+  overflow-y: auto;   /* independent scroll if needed */
+}
+
+#sidebar {
   background-color: #e0e0e0;
   padding: 20px;
   border-right: 1px solid #ccc;
-  height: 100vh;
-  position: fixed;
-  overflow-y: auto;
+  position: sticky;
+  top: 0;
   box-shadow: 2px 0 5px rgba(0,0,0,0.1);
   border-radius: 0 10px 10px 0;
-  font-size: 16px; /* slightly larger for readability */
+  font-size: 16px;
   line-height: 1.5;
 }
 
@@ -101,8 +115,9 @@ ui <- page_fillable(
 
 /* Main content */
 #main {
-  margin-left: 300px;
+  flex: 1;            /* take up remaining horizontal space */
   padding: 20px;
+  margin: 0;          /* no margin-left anymore */
 }
 
 /* Map container */
@@ -182,16 +197,6 @@ table thead {
 .about-title {
     padding-top: 20px;  /* increase top spacing */
   }
-  
-
-/* Scrollbar for sidebar */
-#sidebar::-webkit-scrollbar {
-  width: 8px;
-}
-#sidebar::-webkit-scrollbar-thumb {
-  background-color: #ccc;
-  border-radius: 4px;
-}
 
 /* Leaflet map */
 .leaflet-container {
@@ -282,6 +287,8 @@ table thead {
     tabPanel(
       "Model Output",
       
+ div(id = "page-container",
+    div(id = "sidebar-container",
       div(id = "sidebar",
           selectInput("species", "Select Species:", choices = myspecies_list, selected = myspecies_list[1]),
           hr(),
@@ -289,6 +296,7 @@ table thead {
           uiOutput("species_snapshot"),
           imageOutput("species_image", width = "100%", height = "auto"),
           p(HTML("<small>Image source: <a href='https://www.ccamlr.org/' target='_blank'>CCAMLR</a></small>"))
+      )
       ),
       
       div(id = "main",
@@ -342,8 +350,11 @@ table thead {
           ),
           
           # Footer
-          div(id = "footer")
-      )
+          tags$footer(
+            "Developed by Maddie Thomson", 
+            style = "text-align:center; padding:10px; color: #555; font-size:12px;"
+          )
+      ))
     ), 
     
     # -------------------- Species Information Tab --------------------
@@ -397,19 +408,50 @@ table thead {
     
     # -------------------- About Tab --------------------
     tabPanel("About",
-            fluidRow(
-              column(12,
-             h2("About This App", class = "about-title", style = "color: var(--bs-primary);"),
-      div(htmlOutput("about_app")),
-      h3("Source Code"),
-      uiOutput("species_sources"),  
-      h3("References"),
-      uiOutput("species_references2")
-      )
+             fluidRow(
+               column(12,
+                      h2("About This App", class = "about-title", style = "color: var(--bs-primary);"),
+                      div(htmlOutput("about_app")),
+                      
+                      # Access to Code section
+                      div(
+                        style = "background-color:#f0f8ff; padding:10px; border-radius:8px; border:2px solid #1f77b4; margin-top:10px; font-size:14px;",
+                        h4("Access to Code", style="color:#1f77b4;"),
+                        p(
+                          "All the code behind this app is available on GitHub: ",
+                          tags$a(
+                            href="https://github.com/maddiethomson5-sys/SO-HSM-Approach-2025.git", 
+                            HTML("<b style='color:#1f77b4;'>SO-HSM-Approach-2025</b> &#x1F517;"), 
+                            target="_blank"
+                          ),
+                          style="margin:0;"
+                        ),
+                        p(
+                          "For any questions, you can contact me, Maddie Thomson, at ",
+                          tags$a(href="mailto:maddie.thomson5@gmail.com", "maddie.thomson5@gmail.com"),
+                          style="margin:0;"
+                        )
+                      ),
+                      
+                      # Source Code section
+                      div(
+                        style = "padding:10px; margin-top:10px; background-color:#fafafa; border-radius:8px;",
+                        h3("Source Code"),
+                        uiOutput("species_sources")
+                      ),
+                      
+                      # References section
+                      div(
+                        style = "padding:10px; margin-top:10px; background-color:#fafafa; border-radius:8px;",
+                        h3("References"),
+                        uiOutput("species_references2")
+                      )
+               )
+             )
     )
   )
 )
-)
+    
   
 server <- function(input, output, session) {
   # ---- Reactive species folder paths ----
