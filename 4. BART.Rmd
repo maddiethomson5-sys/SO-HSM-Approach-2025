@@ -277,7 +277,7 @@ print(table(dat_mod$fold, dat_mod$presence, useNA = "ifany"))
 write.csv(as.data.frame(dat_mod), (paste0(myspecies, "/dat_mod", method, ".csv")), row.names = FALSE)
 ```
 
-## 9. Final Ensemble Model Processing and Saving
+## 9. Final BART Model Processing and Saving
 
 The BART model is fitted using the checkerboard training data, incorporating the KDE bias layer and the full set of predictor variables retained by either the Spearman or VIF selection method. Model parameters can be kept relatively simple to reduce computational demand.
 
