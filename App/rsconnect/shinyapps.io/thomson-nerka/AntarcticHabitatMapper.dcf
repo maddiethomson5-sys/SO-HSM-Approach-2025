@@ -5,7 +5,7 @@ account: thomson-nerka
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 15225512
-bundleId: 10815206
+bundleId: 10821475
 url: https://thomson-nerka.shinyapps.io/AntarcticHabitatMapper/
 version: 1
 asMultiple: FALSE

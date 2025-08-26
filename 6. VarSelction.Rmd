@@ -35,10 +35,10 @@ app_dir <- file.path(getwd(), "App")
 myspecies_list <- c("Dissostichus mawsoni", "Dissostichus eleginoides", "Champsocephalus gunnari")
 
 # Change species of interest here
-selected_species <- "Dissostichus mawsoni" 
+selected_species <- "Champsocephalus gunnari" 
 
-# Select variable selection method: "VIF" or "Spearman"
-method <- "VIF"  
+# Select variable selection method: "VIF" or "spearman"
+method <- "spearman"  
 # ----------------------------------------------------
 
 # Define species and clean names function
@@ -76,9 +76,9 @@ dat_clean <- fread(paste0(myspecies, "/predictions/dat_clean", method, ".csv"))
 dat_mod <- fread(paste0(myspecies , "/dat_mod", method, ".csv"))
 
 # Load the model variables seleceted, if you have already saved them. Load the best model prediction if already have them. Load the best model if you already have it. 
-#varsel_emb <- fread(paste0(myspecies, "/varselection/varsel_emb", method, ".csv"))
-#dat3 <- fread(paste0(myspecies, "/predictions/best_modelpred", method, ".csv"))
-#best_model <- readRDS(paste0(myspecies, "/varselection/mod_varsel_embspearman.rds")) #change name if needed 
+varsel_emb <- fread(paste0(myspecies, "/varselection/varsel_emb", method, ".csv"))
+dat3 <- fread(paste0(myspecies, "/predictions/best_modelpreds", method, ".csv"))
+best_model <- readRDS(paste0(myspecies, "/varselection/mod_varsel_embspearman.rds")) #change name if needed 
 ```
 
 ## 2. Variable Selection
@@ -385,7 +385,7 @@ plot_favprobuncert <- function() {
   plot(presences_proj, pch = 21, bg = "green", cex = 0.7, add = TRUE)
   legend(x = 3000000, y = -5000000, legend = "Presences", pch = 21, pt.bg = "green", pt.cex = 0.7, bty = "n")
   SOleg(x = runif(100), position = "topright", col = my.palette.new,
-      breaks = breaks, trim = -38, label = "Habitat Suitability Probability",
+      breaks = breaks, trim = -38, label = "Habitat Suitability Uncertainty",
       rnd = 1, type = "continuous")
 }
 
