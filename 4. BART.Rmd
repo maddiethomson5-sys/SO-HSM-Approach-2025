@@ -7,7 +7,7 @@ output:
     df_print: paged
 ---
 
-**Purpose:** This notebook documents the full workflow for species distribution modelling (SDM). It includes data preprocessing steps such as bias correction with Kernel Density Estimation (KDE), background data selection using spatial block cross-validation, and other preparatory steps for modelling. The workflow then applies the chosen variable selection method (Spearman or VIF), fits the model, and generates initial predictions. Note that the script is computationally intensive and may require considerable runtime.
+**Purpose:** This notebook documents the full workflow for habitat suitability modelling (HSM). It includes data preprocessing steps such as bias correction with Kernel Density Estimation (KDE), background data selection using spatial block cross-validation, and other preparatory steps for modelling. The workflow then applies the chosen variable selection method (Spearman or VIF), fits the model, and generates initial predictions. Note that the script is computationally intensive and may require considerable runtime.
 
 **Code to run before:**: "3. DataCleaning.Rmd"
 
